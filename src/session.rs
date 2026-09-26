@@ -19,6 +19,8 @@ const SCROLLBACK_LINES: usize = 10_000;
 const SYNC_UPDATE_MAX: Duration = Duration::from_millis(100);
 /// Сколько даём Claude на аккуратный выход, прежде чем убить.
 const STOP_GRACE: Duration = Duration::from_millis(1500);
+/// По этим надписям узнаём родной диалог Claude: разрешение, вопрос, план.
+const PROMPT_MARKS: [&str; 3] = ["Esc to cancel", "Do you want to", "Would you like to proceed"];
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
@@ -85,6 +87,18 @@ pub struct Session {
     pid: i32,
     exit_code: Option<u32>,
     sync_since: Option<Instant>,
+    prompt: PromptWatch,
+}
+
+/// Следим за диалогом Claude, пока ждём ответа на запрос. Отвечают в нём
+/// нажатиями в сессии, и событие от Claude приходит, только когда команда
+/// закончится, — а она может идти минутами.
+#[derive(Default)]
+struct PromptWatch {
+    /// Диалог был на экране.
+    seen: bool,
+    /// После этого в сессию что-то нажали.
+    touched: bool,
 }
 
 impl Session {
@@ -182,6 +196,7 @@ impl Session {
             pid,
             exit_code: None,
             sync_since: None,
+            prompt: PromptWatch::default(),
         })
     }
 
@@ -203,7 +218,7 @@ impl Session {
         };
         let replies = std::mem::take(&mut self.parser.callbacks_mut().replies);
         if !replies.is_empty() {
-            self.write(&replies)?;
+            self.send(&replies)?;
         }
         Ok(())
     }
@@ -242,6 +257,38 @@ impl Session {
         self.permissions.len() != before
     }
 
+    /// Ответили прямо в диалоге Claude: он был на экране, в сессию нажали,
+    /// и он пропал. Снимаем ждущие запросы сразу. `true` — что-то сняли.
+    pub fn resolve_answered_prompt(&mut self) -> bool {
+        if self.permissions.is_empty() {
+            self.prompt = PromptWatch::default();
+            return false;
+        }
+        match self.prompt_visible() {
+            Some(true) => self.prompt.seen = true,
+            Some(false) if self.prompt.seen && self.prompt.touched => {
+                self.prompt = PromptWatch::default();
+                for request in self.permissions.drain(..) {
+                    request.answer(Decision::AsUsual);
+                }
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Виден ли диалог Claude. `None` — судить рано: кадр дорисован не до
+    /// конца или смотрим историю.
+    fn prompt_visible(&self) -> Option<bool> {
+        let screen = self.parser.screen();
+        if self.parser.callbacks().sync_update || screen.scrollback() > 0 {
+            return None;
+        }
+        let contents = screen.contents();
+        Some(PROMPT_MARKS.iter().any(|mark| contents.contains(mark)))
+    }
+
     /// Форма курсора, которую попросил Claude (DECSCUSR), если просил.
     pub fn cursor_style(&self) -> Option<u16> {
         self.parser.callbacks().cursor_style
@@ -255,7 +302,19 @@ impl Session {
         std::mem::take(&mut self.parser.callbacks_mut().bell)
     }
 
+    /// То, что нажал или вставил человек.
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        if !self.permissions.is_empty() {
+            if self.prompt_visible() == Some(true) {
+                self.prompt.seen = true;
+            }
+            self.prompt.touched |= self.prompt.seen;
+        }
+        self.send(bytes)
+    }
+
+    /// Служебное: ответы терминала, фокус окна.
+    pub fn send(&mut self, bytes: &[u8]) -> Result<()> {
         self.writer.write_all(bytes)?;
         self.writer.flush()?;
         Ok(())

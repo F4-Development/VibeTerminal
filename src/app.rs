@@ -282,12 +282,13 @@ impl App {
                 let session = &mut self.sessions[index];
                 let title_before = session.title().to_string();
                 session.process(&bytes)?;
+                let answered = session.resolve_answered_prompt();
                 if session.take_bell() {
                     let out = terminal.backend_mut();
                     out.write_all(b"\x07")?;
                     out.flush()?;
                 }
-                Ok(index == self.selected || session.title() != title_before)
+                Ok(index == self.selected || answered || session.title() != title_before)
             }
             Event::Exited(id) => {
                 self.on_exited(id);
@@ -968,7 +969,7 @@ impl App {
         if let Some(session) = self.sessions.get_mut(index)
             && session.wants_focus_events()
         {
-            session.write(if gained { b"\x1b[I" } else { b"\x1b[O" })?;
+            session.send(if gained { b"\x1b[I" } else { b"\x1b[O" })?;
         }
         Ok(())
     }
