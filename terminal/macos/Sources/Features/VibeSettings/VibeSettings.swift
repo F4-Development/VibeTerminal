@@ -9,17 +9,26 @@ import SwiftUI
 /// Шрифт — в файл настроек терминала, применяется сразу.
 final class VibeSettingsController: NSWindowController {
     private static var shared: VibeSettingsController?
+    private let state = VibeSettingsState()
 
-    static func show() {
+    /// `tab` — какую вкладку открыть (`voice` из vv: «выбери модель»).
+    static func show(tab: VibeSettingsTab? = nil) {
         let controller = shared ?? VibeSettingsController()
         shared = controller
+        if let tab { controller.state.tab = tab }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// `vibeterminal://settings/voice` — так vv открывает нужную вкладку.
+    static func open(_ url: URL) {
+        guard url.scheme == "vibeterminal", url.host == "settings" else { return }
+        show(tab: VibeSettingsTab(rawValue: url.lastPathComponent))
+    }
+
     private init() {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: VibeSettingsView()))
+        let window = NSWindow(contentViewController: NSHostingController(rootView: VibeSettingsView(state: state)))
         window.title = "Настройки"
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.center()
@@ -31,15 +40,31 @@ final class VibeSettingsController: NSWindowController {
     }
 }
 
+enum VibeSettingsTab: String {
+    case claude, notifications, voice, look
+}
+
+final class VibeSettingsState: ObservableObject {
+    @Published var tab = VibeSettingsTab.claude
+}
+
 struct VibeSettingsView: View {
+    @ObservedObject var state: VibeSettingsState
+
     var body: some View {
-        TabView {
+        TabView(selection: $state.tab) {
             ClaudeSettings()
                 .tabItem { Label("Claude", systemImage: "sparkles") }
+                .tag(VibeSettingsTab.claude)
             NotificationSettings()
                 .tabItem { Label("Уведомления", systemImage: "bell") }
+                .tag(VibeSettingsTab.notifications)
+            VoiceSettings()
+                .tabItem { Label("Голос", systemImage: "mic") }
+                .tag(VibeSettingsTab.voice)
             LookSettings()
                 .tabItem { Label("Вид", systemImage: "textformat.size") }
+                .tag(VibeSettingsTab.look)
         }
         .frame(width: 580, height: 540)
     }
@@ -159,6 +184,12 @@ struct VvSettings: Codable, Equatable {
     var notifySound = "Glass"
     /// Какие лимиты vv показывает внизу — выбирают галочками в самом vv.
     var usageShown = ["context", "session"]
+    /// Голосовой ввод: модель (пусто — выключен), язык, словарь, отправка, микрофон.
+    var voiceModel = ""
+    var voiceLanguage = "ru"
+    var voiceWords = ""
+    var voiceSend = false
+    var voiceDevice = ""
 
     enum CodingKeys: String, CodingKey {
         case projectsDirs = "projects_dirs"
@@ -172,6 +203,11 @@ struct VvSettings: Codable, Equatable {
         case notifyBanner = "notify_banner"
         case notifySound = "notify_sound"
         case usageShown = "usage_shown"
+        case voiceModel = "voice_model"
+        case voiceLanguage = "voice_language"
+        case voiceWords = "voice_words"
+        case voiceSend = "voice_send"
+        case voiceDevice = "voice_device"
     }
 
     init() {}
@@ -190,6 +226,11 @@ struct VvSettings: Codable, Equatable {
         notifyBanner = try container.decodeIfPresent(Bool.self, forKey: .notifyBanner) ?? defaults.notifyBanner
         notifySound = try container.decodeIfPresent(String.self, forKey: .notifySound) ?? defaults.notifySound
         usageShown = try container.decodeIfPresent([String].self, forKey: .usageShown) ?? defaults.usageShown
+        voiceModel = try container.decodeIfPresent(String.self, forKey: .voiceModel) ?? defaults.voiceModel
+        voiceLanguage = try container.decodeIfPresent(String.self, forKey: .voiceLanguage) ?? defaults.voiceLanguage
+        voiceWords = try container.decodeIfPresent(String.self, forKey: .voiceWords) ?? defaults.voiceWords
+        voiceSend = try container.decodeIfPresent(Bool.self, forKey: .voiceSend) ?? defaults.voiceSend
+        voiceDevice = try container.decodeIfPresent(String.self, forKey: .voiceDevice) ?? defaults.voiceDevice
     }
 
     static var url: URL {

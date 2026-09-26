@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
-use crate::app::{App, Confirm, Overlay};
+use crate::app::{App, Confirm, Overlay, VoiceState};
 use crate::gitui::{self, GitTarget};
 use crate::hooks::{self, Decision};
 use crate::menu::{self, Action, MenuItem};
@@ -121,6 +121,8 @@ pub enum Target {
     /// Строка в окне лимитов: галочка «показывать внизу».
     UsageRow(usize),
     UsageRefresh,
+    /// Микрофон в поле ввода (или идущая запись) — голосовой ввод.
+    Mic,
 }
 
 /// Что под мышью. Пока открыто окно, кликается только оно.
@@ -161,6 +163,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             }
             if usage_badge(app).is_some_and(|(_, r)| contains(r, column, row)) {
                 return Some(Target::Usage);
+            }
+            if mic_rect(app).or_else(|| voice_area(app)).is_some_and(|r| contains(r, column, row)) {
+                return Some(Target::Mic);
             }
             if permit_bar(app).is_none() && waiting_button(app).is_some_and(|(r, _)| contains(r, column, row)) {
                 return Some(Target::NextWaiting);
@@ -417,6 +422,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_sidebar(frame, sidebar, app);
     }
     draw_agent(frame, app);
+    draw_voice(frame, app);
     if let Some((line, rect)) = usage_badge(app) {
         let line = if hovered(app, Target::Usage) { line.style(primary()) } else { line };
         frame.render_widget(Paragraph::new(line), rect);
@@ -430,7 +436,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 let screen = session.screen();
                 let agent = app.areas.agent;
                 let (row, col) = screen.cursor_position();
-                if session.scrollback() == 0 && !screen.hide_cursor() && row < agent.height && col < agent.width {
+                let voice_idle = matches!(app.voice, VoiceState::Idle);
+                if voice_idle && session.scrollback() == 0 && !screen.hide_cursor() && row < agent.height && col < agent.width {
                     frame.set_cursor_position((agent.x + col, agent.y + row));
                 }
             }
@@ -695,6 +702,102 @@ fn ci_badge(app: &App) -> Option<(String, Style, Rect)> {
     let w = width(&label);
     let rect = Rect::new(area.right().saturating_sub(w + 2), area.y, w, 1);
     Some((label, style, rect))
+}
+
+// ── Голосовой ввод ───────────────────────────────────────────────────────
+
+const MIC: &str = "🎤";
+const EQ_BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Поле ввода Claude на экране: строки между двумя линиями `───`, первая
+/// начинается с приглашения (`❯`, `!` в режиме bash, `#` для памяти).
+/// Возвращает строки поля относительно окна Claude.
+fn input_rows(screen: &vt100::Screen) -> Option<(u16, u16)> {
+    let (rows, cols) = screen.size();
+    let lines: Vec<String> = screen.rows(0, cols).collect();
+    let rule = |line: &String| {
+        let trimmed = line.trim();
+        trimmed.chars().count() >= (cols as usize / 2).max(20) && trimmed.chars().all(|c| c == '─')
+    };
+    let bottom = (0..rows as usize).rev().find(|&r| rule(&lines[r]))?;
+    let top = (bottom.saturating_sub(16)..bottom).rev().find(|&r| rule(&lines[r]))?;
+    let first = lines.get(top + 1)?.trim_start();
+    let prompt = ["❯", "!", "#", ">"].iter().any(|p| first.starts_with(p));
+    (prompt && bottom > top + 1).then_some(((top + 1) as u16, (bottom - 1) as u16))
+}
+
+/// Поле ввода открытой сессии Claude — где рисовать микрофон и эквалайзер.
+fn input_box(app: &App) -> Option<Rect> {
+    let session = app.current().filter(|s| !s.is_command && s.scrollback() == 0)?;
+    let (first, last) = input_rows(session.screen())?;
+    let agent = app.areas.agent;
+    (last < agent.height).then(|| Rect::new(agent.x, agent.y + first, agent.width, last - first + 1))
+}
+
+/// Микрофон справа в первой строке поля ввода.
+fn mic_rect(app: &App) -> Option<Rect> {
+    if !matches!(app.voice, VoiceState::Idle) || !matches!(app.overlay, Overlay::None) {
+        return None;
+    }
+    let field = input_box(app)?;
+    (field.width > 10).then(|| Rect::new(field.right() - 3, field.y, width(MIC), 1))
+}
+
+/// Где идёт запись или распознавание: поле ввода, а не нашлось — нижняя строка.
+fn voice_area(app: &App) -> Option<Rect> {
+    let session = match &app.voice {
+        VoiceState::Idle => return None,
+        VoiceState::Recording { session, .. } | VoiceState::Transcribing { session, .. } => *session,
+    };
+    let here = app.current().is_some_and(|s| s.id == session);
+    Some(if here { input_box(app).unwrap_or(app.areas.bottom) } else { app.areas.bottom })
+}
+
+fn draw_voice(frame: &mut Frame, app: &App) {
+    if let Some(rect) = mic_rect(app) {
+        let has_model = !crate::settings::Settings::load(&app.home).voice_model.is_empty();
+        let style = if hovered(app, Target::Mic) { primary() } else if has_model { Style::new() } else { dim() };
+        frame.render_widget(Paragraph::new(Span::styled(MIC, style)), rect);
+        return;
+    }
+    let Some(area) = voice_area(app) else { return };
+    frame.render_widget(Clear, area);
+    let line = Rect::new(area.x, area.y, area.width, 1);
+    match &app.voice {
+        VoiceState::Idle => {}
+        VoiceState::Recording { recording, .. } => {
+            let seconds = recording.elapsed().as_secs();
+            let clock = format!("  {}:{:02}", seconds / 60, seconds % 60);
+            let hint = "Enter — готово · Esc — отмена ";
+            let hint_width = if area.width > 60 { width(hint) } else { 0 };
+            let bars = area.width.saturating_sub(2 + width(&clock) + hint_width + 2) as usize;
+            let wave: String = recording
+                .levels(bars)
+                .iter()
+                .map(|level| EQ_BARS[((level * (EQ_BARS.len() - 1) as f32).round() as usize).min(EQ_BARS.len() - 1)])
+                .collect();
+            // Точка мигает раз в полсекунды — видно, что пишем.
+            let blink = recording.elapsed().as_millis() / 500 % 2 == 0;
+            let dot = Style::new().fg(if blink { Color::Red } else { Color::Indexed(52) });
+            let mut spans = vec![Span::styled("● ", dot), Span::styled(wave, Style::new().fg(ACCENT)), Span::styled(clock, bold())];
+            if hint_width > 0 {
+                spans.push(Span::raw("  "));
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), line);
+            if hint_width > 0 {
+                frame.render_widget(Paragraph::new(Span::styled(hint, dim())).alignment(Alignment::Right), line);
+            }
+        }
+        VoiceState::Transcribing { since, .. } => {
+            let spinner = ['◐', '◓', '◑', '◒'][(since.elapsed().as_millis() / 150 % 4) as usize];
+            let text = Line::from(vec![
+                Span::styled(format!("{spinner} "), accent()),
+                Span::styled("Распознаю…", bold()),
+                Span::styled("  Esc — отмена", dim()),
+            ]);
+            frame.render_widget(Paragraph::new(text), line);
+        }
+    }
 }
 
 // ── Лимиты Claude и контекст чата ────────────────────────────────────────

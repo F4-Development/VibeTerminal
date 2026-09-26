@@ -41,6 +41,16 @@ pub struct Settings {
     pub notify_sound: String,
     /// Какие лимиты Claude показывать внизу: `session`, `week`, `week:Fable`…
     pub usage_shown: Vec<String>,
+    /// Голосовой ввод: модель Whisper (`large-v3-turbo-q5_0`…); пусто — выключен.
+    pub voice_model: String,
+    /// `ru`, `en` или `auto`.
+    pub voice_language: String,
+    /// Слова, которые надо узнавать правильно, — подсказка Whisper.
+    pub voice_words: String,
+    /// Распознал — сразу отправить Claude, а не только вставить.
+    pub voice_send: bool,
+    /// Имя микрофона; пусто — системный.
+    pub voice_device: String,
 }
 
 impl Default for Settings {
@@ -57,6 +67,11 @@ impl Default for Settings {
             notify_banner: true,
             notify_sound: "Glass".into(),
             usage_shown: vec!["context".into(), "session".into()],
+            voice_model: String::new(),
+            voice_language: "ru".into(),
+            voice_words: String::new(),
+            voice_send: false,
+            voice_device: String::new(),
         }
     }
 }

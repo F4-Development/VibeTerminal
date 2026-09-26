@@ -5,6 +5,7 @@
 
 use std::io::{self, BufWriter, Stdout, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
@@ -31,6 +32,7 @@ use crate::session::{self, Launch, Program, Session, SessionId};
 use crate::notify::{self, Notifier};
 use crate::status::{self, State};
 use crate::usage::{self, Limit};
+use crate::voice;
 use crate::settings::Settings;
 use crate::caps::Caps;
 use crate::ci::{self, CiState, Job};
@@ -68,6 +70,10 @@ const USAGE_EVERY: Duration = Duration::from_secs(300);
 const USAGE_AFTER_TURN: Duration = Duration::from_secs(60);
 /// …а при открытии окна лимитов — если старше этого.
 const USAGE_ON_OPEN: Duration = Duration::from_secs(20);
+/// Пока идёт запись, эквалайзер перерисовывается так часто.
+const VOICE_FRAME: Duration = Duration::from_millis(40);
+/// Модель голоса не нужна столько — выгружаем, она занимает сотни мегабайт.
+const VOICE_UNLOAD: Duration = Duration::from_secs(600);
 
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static POINTER_SHAPES: AtomicBool = AtomicBool::new(false);
@@ -107,6 +113,8 @@ pub enum Event {
     Usage(Result<Vec<Limit>, String>),
     /// Claude обновил строку состояния: контекст и лимиты.
     StatusLine(SessionId, StatusLine),
+    /// Голос распознан (или нет).
+    VoiceText(SessionId, Result<String, String>),
     /// Терминал пользователя пропал или vv попросили закрыться.
     Hangup,
 }
@@ -124,6 +132,13 @@ pub enum Overlay {
     Git(GitOverlay),
     /// Лимиты Claude, выбран лимит с этим номером.
     Usage(usize),
+}
+
+/// Голосовой ввод в сессию.
+pub enum VoiceState {
+    Idle,
+    Recording { session: SessionId, recording: voice::Recording },
+    Transcribing { session: SessionId, since: Instant },
 }
 
 pub enum Confirm {
@@ -165,6 +180,9 @@ pub struct App {
     pub usage_loading: bool,
     /// Какие лимиты показывать внизу (из настроек).
     pub usage_shown: Vec<String>,
+    pub voice: VoiceState,
+    /// Когда последний раз распознавали — чтобы выгрузить модель без дела.
+    voice_used: Option<Instant>,
     quit: bool,
 }
 
@@ -212,6 +230,8 @@ pub fn run() -> Result<()> {
         usage_at: None,
         usage_loading: false,
         usage_shown,
+        voice: VoiceState::Idle,
+        voice_used: None,
         stopping: Vec::new(),
         quit: false,
     };
@@ -237,6 +257,8 @@ pub fn run() -> Result<()> {
     app.save_state();
     // Что бы ни случилось, Claude не должны пережить окно vv.
     app.stop_everything();
+    // Модель голоса — до выхода, иначе Metal уронит процесс на выходе.
+    voice::unload();
     restore_terminal();
 
     result
@@ -277,6 +299,11 @@ impl App {
             self.refresh_ci_view();
             self.refresh_usage(USAGE_EVERY);
             let banner_due = self.notifier.flush(terminal.backend_mut())?;
+            dirty |= !matches!(self.voice, VoiceState::Idle);
+            if self.voice_used.is_some_and(|at| at.elapsed() >= VOICE_UNLOAD) && matches!(self.voice, VoiceState::Idle) {
+                self.voice_used = None;
+                thread::spawn(voice::unload);
+            }
             let hold = self.current().and_then(Session::frame_hold);
             if dirty && hold.is_none() {
                 self.draw(terminal)?;
@@ -291,6 +318,8 @@ impl App {
                 (false, None) => tick,
             };
             let wake = banner_due.map_or(wake, |due| due.min(wake));
+            // Эквалайзер и «Распознаю…» живые.
+            let wake = if matches!(self.voice, VoiceState::Idle) { wake } else { wake.min(VOICE_FRAME) };
             let event = match rx.recv_timeout(wake) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
@@ -426,6 +455,27 @@ impl App {
                     limits |= usage::set_live(&mut self.usage, "week", percent);
                 }
                 Ok(limits || (changed && index == self.selected))
+            }
+            Event::VoiceText(id, result) => {
+                if !matches!(self.voice, VoiceState::Transcribing { session, .. } if session == id) {
+                    return Ok(false);
+                }
+                self.voice = VoiceState::Idle;
+                self.voice_used = Some(Instant::now());
+                let send = Settings::load(&self.home).voice_send;
+                match (result, self.index_of(id)) {
+                    (Ok(text), Some(index)) => {
+                        let session = &mut self.sessions[index];
+                        session.scroll_to_bottom();
+                        session.paste(&text)?;
+                        if send {
+                            session.write(b"\r")?;
+                        }
+                    }
+                    (Ok(_), None) => {}
+                    (Err(text), _) => self.set_flash(format!("Голос: {text}")),
+                }
+                Ok(true)
             }
             Event::Usage(result) => {
                 self.usage_loading = false;
@@ -593,6 +643,25 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Идёт запись: Enter — распознать, Esc — отменить, остальное не в Claude.
+        if matches!(self.voice, VoiceState::Recording { .. }) {
+            match key.code {
+                KeyCode::Enter => self.finish_voice(),
+                KeyCode::Esc => self.cancel_voice(),
+                KeyCode::F(13) => self.finish_voice(),
+                _ => {}
+            }
+            return Ok(true);
+        }
+        if matches!(self.voice, VoiceState::Transcribing { .. }) && key.code == KeyCode::Esc {
+            self.cancel_voice();
+            return Ok(true);
+        }
+        // Горячая клавиша голоса: VibeTerminal отдаёт ⌘⇧Space как F13.
+        if key.code == KeyCode::F(13) && matches!(self.overlay, Overlay::None) {
+            self.start_voice();
+            return Ok(true);
+        }
         if !matches!(self.overlay, Overlay::None) {
             return self.on_overlay_key(key);
         }
@@ -707,6 +776,10 @@ impl App {
                 self.overlay = Overlay::Usage(0);
                 self.refresh_usage(USAGE_ON_OPEN);
             }
+            Action::Voice => match self.voice {
+                VoiceState::Recording { .. } => self.finish_voice(),
+                _ => self.start_voice(),
+            },
             Action::NextWaiting => {
                 if let Some(&index) = status::queue(&self.sessions, self.selected).first() {
                     self.select(index)?;
@@ -858,6 +931,7 @@ impl App {
             Target::Branch => self.open_git_menu(),
             Target::Ci => self.open_ci(),
             Target::Usage => self.perform(Action::Usage)?,
+            Target::Mic => self.perform(Action::Voice)?,
             Target::UsageRow(index) => {
                 self.overlay = Overlay::Usage(index);
                 self.toggle_usage(index);
@@ -1167,6 +1241,68 @@ impl App {
         let Some(overlay) = gitui::open_ci(&state) else { return };
         self.overlay = Overlay::Git(overlay);
         self.refresh_ci_view();
+    }
+
+    /// Начать запись в открытую сессию. Модели нет — открыть настройки голоса.
+    fn start_voice(&mut self) {
+        let Some(session) = self.current().filter(|s| !s.is_command) else { return };
+        if !matches!(self.voice, VoiceState::Idle) {
+            return;
+        }
+        let id = session.id;
+        let settings = Settings::load(&self.home);
+        let Some(model) = voice::model_path(&self.home, &settings.voice_model) else {
+            self.open_voice_settings();
+            return;
+        };
+        // Модель грузится, пока ты говоришь.
+        thread::spawn(move || voice::preload(&model));
+        match voice::Recording::start(&settings.voice_device) {
+            Ok(recording) => self.voice = VoiceState::Recording { session: id, recording },
+            Err(text) => self.set_flash(format!("Голос: {text}")),
+        }
+    }
+
+    /// Enter: остановить запись и распознать в фоне.
+    fn finish_voice(&mut self) {
+        let VoiceState::Recording { session, recording } = std::mem::replace(&mut self.voice, VoiceState::Idle) else {
+            return;
+        };
+        let settings = Settings::load(&self.home);
+        let Some(model) = voice::model_path(&self.home, &settings.voice_model) else {
+            recording.cancel();
+            self.open_voice_settings();
+            return;
+        };
+        self.voice = VoiceState::Transcribing { session, since: Instant::now() };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = recording
+                .finish()
+                .and_then(|captured| voice::transcribe(captured, &model, &settings.voice_language, &settings.voice_words));
+            let _ = tx.send(Event::VoiceText(session, result));
+        });
+    }
+
+    fn cancel_voice(&mut self) {
+        if let VoiceState::Recording { recording, .. } = std::mem::replace(&mut self.voice, VoiceState::Idle) {
+            recording.cancel();
+        }
+    }
+
+    /// Модель не выбрана: вкладка «Голос» в настройках VibeTerminal.
+    fn open_voice_settings(&mut self) {
+        let opened = Command::new("open")
+            .arg("vibeterminal://settings/voice")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        self.set_flash(if opened {
+            "Выбери модель голоса в настройках — вкладка «Голос»"
+        } else {
+            "Выбери модель голоса: voice_model в vv.json"
+        });
     }
 
     /// Узнать лимиты Claude в фоне, если последние старше `older_than`.

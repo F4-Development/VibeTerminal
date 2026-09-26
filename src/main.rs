@@ -17,6 +17,7 @@ mod ui;
 mod usage;
 mod userenv;
 mod view;
+mod voice;
 
 const HELP: &str = "\
 vv — VibeTerminal, терминальный пульт для вайбкодинга

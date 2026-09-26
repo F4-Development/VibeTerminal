@@ -175,6 +175,13 @@ class AppDelegate: NSObject,
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Ссылки vibeterminal://settings/… (vv открывает ими настройки).
+        // Отдельным обработчиком — application(_:open:) отключил бы открытие файлов.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleVibeURL(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL))
         #if DEBUG
         if
             let suite = UserDefaults.ghosttySuite,
@@ -454,6 +461,12 @@ class AppDelegate: NSObject,
         // No visible windows, open a new one.
         _ = TerminalController.newWindow(ghostty)
         return false
+    }
+
+    @objc private func handleVibeURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let text = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: text) else { return }
+        VibeSettingsController.open(url)
     }
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {

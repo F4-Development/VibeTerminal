@@ -15,6 +15,8 @@ pub enum Action {
     NextWaiting,
     /// Окно лимитов Claude.
     Usage,
+    /// Голосовой ввод: начать или закончить запись.
+    Voice,
     Settings,
     Help,
     Quit,
@@ -45,6 +47,7 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
     let sidebar_label = if sidebar_shown { "Скрыть список сессий" } else { "Показать список сессий" };
     let actions = [
         ("+", "Новая сессия", 'n', Action::New),
+        ("●", "Голосовой ввод", 'v', Action::Voice),
         ("→", "К следующей, кто ждёт", 'w', Action::NextWaiting),
         ("⎇", "Ветки и git…", 'g', Action::Git),
         ("✎", "Переименовать сессию", 'r', Action::Rename),
@@ -58,7 +61,7 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
     let has_session = !sessions.is_empty();
     let someone_waits = !status::queue(sessions, selected).is_empty();
     let actions = actions.into_iter().filter(|(_, _, _, action)| match action {
-        Action::Rename | Action::Close | Action::Git => has_session,
+        Action::Rename | Action::Close | Action::Git | Action::Voice => has_session,
         Action::NextWaiting => someone_waits,
         _ => true,
     });
