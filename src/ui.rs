@@ -134,7 +134,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
                 if let Some((_, _, decision)) = bar.buttons.iter().find(|(r, _, _)| contains(*r, column, row)) {
                     return Some(Target::Permit(app.selected, *decision));
                 }
-            } else if let Some(button) = bottom_buttons(&app.areas).into_iter().find(|b| contains(b.rect, column, row)) {
+            } else if let Some(button) =
+                bottom_buttons(&app.areas, !app.sessions.is_empty()).into_iter().find(|b| contains(b.rect, column, row))
+            {
                 return Some(Target::Bottom(button.action));
             }
             if contains(menu_button(app.areas.top), column, row) {
@@ -174,7 +176,7 @@ pub struct PermitBar {
 }
 
 pub fn permit_bar(app: &App) -> Option<PermitBar> {
-    let session = app.current();
+    let session = app.current()?;
     let request = session.pending_permission()?;
     let (what, detail) = hooks::describe(&request.tool, &request.input, &session.cwd);
     let detail = detail.lines().next().unwrap_or_default();
@@ -223,12 +225,16 @@ pub fn card_at(cards: Rect, offset: usize, column: u16, row: u16) -> Option<usiz
 }
 
 /// Кнопки внизу. «Новая сессия» здесь, только когда спрятан список, где она уже есть.
-pub fn bottom_buttons(areas: &Areas) -> Vec<Button> {
+pub fn bottom_buttons(areas: &Areas, has_session: bool) -> Vec<Button> {
     let bottom = areas.bottom;
     let mut x = bottom.x + 1;
     let mut out = Vec::new();
     let skip_new = areas.sidebar.is_some() as usize;
     for (icon, label, action) in BOTTOM_BUTTONS.into_iter().skip(skip_new) {
+        // Без сессий нечего переименовывать и закрывать.
+        if !has_session && matches!(action, Action::Rename | Action::Close) {
+            continue;
+        }
         let w = width(icon) + 1 + width(label);
         if x + w > bottom.right() {
             break;
@@ -356,12 +362,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let full = app.areas.full;
     match &app.overlay {
         Overlay::None => {
-            let session = app.current();
-            let screen = session.screen();
-            let agent = app.areas.agent;
-            let (row, col) = screen.cursor_position();
-            if session.scrollback() == 0 && !screen.hide_cursor() && row < agent.height && col < agent.width {
-                frame.set_cursor_position((agent.x + col, agent.y + row));
+            if let Some(session) = app.current() {
+                let screen = session.screen();
+                let agent = app.areas.agent;
+                let (row, col) = screen.cursor_position();
+                if session.scrollback() == 0 && !screen.hide_cursor() && row < agent.height && col < agent.width {
+                    frame.set_cursor_position((agent.x + col, agent.y + row));
+                }
             }
         }
         Overlay::Menu(cursor) => draw_menu(frame, app, *cursor),
@@ -379,7 +386,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Overlay::Confirm(confirm) => {
             let (title, text) = match confirm {
-                Confirm::Close => (" Закрыть сессию? ", format!("Claude в «{}» остановится.", app.current().name)),
+                Confirm::Close => (" Закрыть сессию? ", format!("Claude в «{}» остановится.", app.current().map_or("", |s| s.name.as_str()))),
                 Confirm::Quit => (
                     " Выйти из VibeTerminal? ",
                     match app.sessions.len() {
@@ -455,7 +462,10 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_agent(frame: &mut Frame, app: &App) {
-    let session = app.current();
+    let Some(session) = app.current() else {
+        draw_welcome(frame, app);
+        return;
+    };
     let path = display_path(&session.cwd, &app.home);
     let title = Line::from(vec![
         Span::styled(format!(" {} ", session.name), Style::new().add_modifier(Modifier::BOLD)),
@@ -468,6 +478,34 @@ fn draw_agent(frame: &mut Frame, app: &App) {
     }
     frame.render_widget(block, app.areas.agent_frame);
     view::render(session.screen(), app.areas.agent, frame.buffer_mut(), app.caps.truecolor);
+}
+
+/// Нет ни одной сессии: приглашение выбрать проект.
+fn draw_welcome(frame: &mut Frame, app: &App) {
+    let block = frame_block(" Начало ", false);
+    frame.render_widget(block, app.areas.agent_frame);
+    let area = app.areas.agent;
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(">", bold()),
+            Span::styled("~", accent()),
+            Span::styled(" VibeTerminal", bold()),
+        ]),
+        Line::raw(""),
+        Line::raw("Выбери проект, и в нём запустится Claude."),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("Нажми "),
+            Span::styled("+ Новая сессия", accent()),
+            Span::raw(" или "),
+            Span::styled("Ctrl-\\", bold()),
+            Span::raw(" → N."),
+        ]),
+    ];
+    let height = lines.len() as u16;
+    let y = area.y + area.height.saturating_sub(height) / 3;
+    let text = Rect::new(area.x, y, area.width, height.min(area.height));
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), text);
 }
 
 fn draw_bottom(frame: &mut Frame, app: &App) {
@@ -489,7 +527,7 @@ fn draw_bottom(frame: &mut Frame, app: &App) {
         }
         return;
     }
-    let buttons = bottom_buttons(&app.areas);
+    let buttons = bottom_buttons(&app.areas, !app.sessions.is_empty());
     for button in &buttons {
         let line = if hovered(app, Target::Bottom(button.action)) {
             Line::from(Span::styled(format!("{} {}", button.icon, button.label), primary()))
@@ -500,7 +538,7 @@ fn draw_bottom(frame: &mut Frame, app: &App) {
     }
 
     let note = app.flash().map(str::to_string).or_else(|| {
-        let scrolled = app.current().scrollback();
+        let scrolled = app.current().map_or(0, Session::scrollback);
         (scrolled > 0).then(|| format!("↑ история, {scrolled} строк вверх · любая клавиша — вниз"))
     });
     if let Some(note) = note {

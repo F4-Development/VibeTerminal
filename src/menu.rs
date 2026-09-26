@@ -44,7 +44,9 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
         ("?", "Как пользоваться", '?', Action::Help),
         ("↪", "Выйти из VibeTerminal", 'q', Action::Quit),
     ];
-    for (i, (icon, label, key, action)) in actions.into_iter().enumerate() {
+    let has_session = !sessions.is_empty();
+    let actions = actions.into_iter().filter(|(_, _, _, action)| has_session || !matches!(action, Action::Rename | Action::Close));
+    for (i, (icon, label, key, action)) in actions.enumerate() {
         items.push(MenuItem { icon, label: label.to_string(), hotkey: Some(key), action, gap_before: i == 0 });
     }
     items

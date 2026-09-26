@@ -109,8 +109,6 @@ pub struct App {
     /// Закрытые сессии, которые ещё гасятся в фоне.
     stopping: Vec<JoinHandle<()>>,
     quit: bool,
-    /// Что сказать после выхода, если последний Claude закрылся с ошибкой.
-    exit_note: Option<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -150,10 +148,17 @@ pub fn run() -> Result<()> {
         window_title: String::new(),
         stopping: Vec::new(),
         quit: false,
-        exit_note: None,
     };
 
-    let result = app.open(&cwd).and_then(|()| {
+    // Из Dock приложение стартует в домашней папке — там Claude не нужен,
+    // встречаем выбором проекта. Из терминала в папке проекта — сразу Claude.
+    let started = if cwd == app.home || cwd == Path::new("/") {
+        app.overlay = Overlay::Picker(Picker::new(&app.home));
+        Ok(())
+    } else {
+        app.open(&cwd)
+    };
+    let result = started.and_then(|()| {
         spawn_input_thread(tx);
         app.run_loop(&mut terminal, &rx)
     });
@@ -161,20 +166,17 @@ pub fn run() -> Result<()> {
     app.stop_everything();
     restore_terminal();
 
-    result?;
-    if let Some(note) = app.exit_note {
-        eprintln!("vv: {note}");
-    }
-    Ok(())
+    result
 }
 
 impl App {
-    pub fn current(&self) -> &Session {
-        &self.sessions[self.selected]
+    /// Открытая сессия. Нет ни одной — на экране выбор проекта.
+    pub fn current(&self) -> Option<&Session> {
+        self.sessions.get(self.selected)
     }
 
-    fn current_mut(&mut self) -> &mut Session {
-        &mut self.sessions[self.selected]
+    fn current_mut(&mut self) -> Option<&mut Session> {
+        self.sessions.get_mut(self.selected)
     }
 
     pub fn flash(&self) -> Option<&str> {
@@ -188,7 +190,7 @@ impl App {
     fn run_loop(&mut self, terminal: &mut Screen, rx: &Receiver<Event>) -> Result<()> {
         let mut dirty = true;
         while !self.quit {
-            let hold = self.current().frame_hold();
+            let hold = self.current().and_then(Session::frame_hold);
             if dirty && hold.is_none() {
                 self.draw(terminal)?;
                 dirty = false;
@@ -236,12 +238,15 @@ impl App {
         let this = &*self;
         terminal.draw(|frame| ui::draw(frame, this))?;
         let out = terminal.backend_mut();
-        let title = format!("{} — VibeTerminal", self.current().name);
+        let title = match self.current() {
+            Some(session) => format!("{} — VibeTerminal", session.name),
+            None => "VibeTerminal".to_string(),
+        };
         if title != self.window_title {
             write!(out, "\x1b]0;{title}\x07")?;
             self.window_title = title;
         }
-        let shape = self.current().cursor_style().unwrap_or(CURSOR_BAR);
+        let shape = self.current().and_then(Session::cursor_style).unwrap_or(CURSOR_BAR);
         if shape != self.cursor_shape {
             write!(out, "\x1b[{shape} q")?;
             self.cursor_shape = shape;
@@ -305,9 +310,10 @@ impl App {
                     Overlay::Picker(picker) => picker.push(&text),
                     Overlay::Rename(input) => input.push_str(text.lines().next().unwrap_or("")),
                     Overlay::None => {
-                        let session = self.current_mut();
-                        session.scroll_to_bottom();
-                        session.paste(&text)?;
+                        if let Some(session) = self.current_mut() {
+                            session.scroll_to_bottom();
+                            session.paste(&text)?;
+                        }
                     }
                     _ => {}
                 }
@@ -336,7 +342,7 @@ impl App {
             self.overlay = Overlay::Menu(self.selected);
             return Ok(true);
         }
-        let session = self.current_mut();
+        let Some(session) = self.current_mut() else { return Ok(false) };
         session.scroll_to_bottom();
         let bytes = keys::encode(&key, session.screen().application_cursor());
         if !bytes.is_empty() {
@@ -408,8 +414,15 @@ impl App {
         match action {
             Action::Select(index) => self.select(index)?,
             Action::New => self.overlay = Overlay::Picker(Picker::new(&self.home)),
-            Action::Rename => self.overlay = Overlay::Rename(self.current().name.clone()),
-            Action::Close => self.overlay = Overlay::Confirm(Confirm::Close),
+            Action::Rename => {
+                if let Some(session) = self.current() {
+                    self.overlay = Overlay::Rename(session.name.clone());
+                }
+            }
+            Action::Close if !self.sessions.is_empty() => self.overlay = Overlay::Confirm(Confirm::Close),
+            Action::Close => {}
+            // Нечего останавливать — выходим без вопроса.
+            Action::Quit if self.sessions.is_empty() => self.quit = true,
             Action::Quit => self.overlay = Overlay::Confirm(Confirm::Quit),
             Action::Help => self.overlay = Overlay::Help,
             Action::ToggleSidebar => {
@@ -425,9 +438,12 @@ impl App {
         match std::mem::replace(&mut self.overlay, Overlay::None) {
             Overlay::Rename(input) => {
                 let name = input.trim();
-                if !name.is_empty() && name != self.current().name {
+                let current = self.current().map(|s| s.name.clone());
+                if !name.is_empty() && current.is_some_and(|c| c != name) {
                     let unique = self.unique_name(name);
-                    self.current_mut().name = unique;
+                    if let Some(session) = self.current_mut() {
+                        session.name = unique;
+                    }
                 }
             }
             Overlay::Confirm(Confirm::Close) => self.close_current(),
@@ -517,17 +533,19 @@ impl App {
             return Ok(dirty);
         }
         let area = self.areas.agent;
-        let screen = self.current().screen();
+        let Some(screen) = self.current().map(Session::screen) else { return Ok(dirty) };
         let encoded =
             mouse::encode(&event, column - area.x, row - area.y, screen.mouse_protocol_mode(), screen.mouse_protocol_encoding());
         if let Some(bytes) = encoded {
-            self.current_mut().write(&bytes)?;
+            if let Some(session) = self.current_mut() {
+                session.write(&bytes)?;
+            }
             return Ok(dirty);
         }
         // Claude мышь не слушает — колесо листает нашу историю.
         match event.kind {
-            MouseEventKind::ScrollUp => self.current_mut().scroll_up(WHEEL_LINES),
-            MouseEventKind::ScrollDown => self.current_mut().scroll_down(WHEEL_LINES),
+            MouseEventKind::ScrollUp => self.current_mut().into_iter().for_each(|s| s.scroll_up(WHEEL_LINES)),
+            MouseEventKind::ScrollDown => self.current_mut().into_iter().for_each(|s| s.scroll_down(WHEEL_LINES)),
             _ => return Ok(dirty),
         }
         Ok(true)
@@ -590,6 +608,9 @@ impl App {
 
     /// Закрыть выбранную сессию: Claude гасим в фоне, чтобы не ждать.
     fn close_current(&mut self) {
+        if self.selected >= self.sessions.len() {
+            return;
+        }
         let mut session = self.sessions.remove(self.selected);
         self.set_flash(format!("«{}» закрыта", session.name));
         self.stopping.push(thread::spawn(move || session::stop_all(std::slice::from_mut(&mut session))));
@@ -605,9 +626,6 @@ impl App {
             0 => format!("«{}»: Claude закрылся", session.name),
             code => format!("«{}»: Claude завершился с кодом {code}", session.name),
         };
-        if self.sessions.is_empty() && code != 0 {
-            self.exit_note = Some(note.clone());
-        }
         self.set_flash(note);
         if index < self.selected {
             self.selected -= 1;
@@ -618,8 +636,10 @@ impl App {
     }
 
     fn after_removal(&mut self) {
+        // Закрылась последняя — снова выбор проекта, окно не закрываем.
         if self.sessions.is_empty() {
-            self.quit = true;
+            self.selected = 0;
+            self.overlay = Overlay::Picker(Picker::new(&self.home));
             return;
         }
         self.selected = self.selected.min(self.sessions.len() - 1);
