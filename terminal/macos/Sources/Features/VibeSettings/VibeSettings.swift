@@ -3,11 +3,10 @@ import AppKit
 import GhosttyKit
 import SwiftUI
 
-/// Окно настроек VibeTerminal (⌘,).
+/// Окно настроек VibeTerminal (⌘,): только то, что нужно для работы с Claude.
 ///
-/// Настройки терминала пишутся в файл настроек Ghostty и применяются сразу.
-/// Настройки Claude-сессий — в ~/.config/vibeterminal/vv.json, его читает vv
-/// при каждой новой сессии.
+/// Claude и уведомления — в ~/.config/vibeterminal/vv.json, его читает vv.
+/// Шрифт — в файл настроек терминала, применяется сразу.
 final class VibeSettingsController: NSWindowController {
     private static var shared: VibeSettingsController?
 
@@ -35,14 +34,12 @@ final class VibeSettingsController: NSWindowController {
 struct VibeSettingsView: View {
     var body: some View {
         TabView {
-            AppearanceSettings()
-                .tabItem { Label("Внешний вид", systemImage: "paintbrush") }
-            WindowSettings()
-                .tabItem { Label("Окна", systemImage: "macwindow") }
             ClaudeSettings()
                 .tabItem { Label("Claude", systemImage: "sparkles") }
             NotificationSettings()
                 .tabItem { Label("Уведомления", systemImage: "bell") }
+            LookSettings()
+                .tabItem { Label("Вид", systemImage: "textformat.size") }
         }
         .frame(width: 580, height: 540)
     }
@@ -106,109 +103,37 @@ struct TerminalConfigFile {
 
 private let defaultFontSize = 13.0
 
-struct AppearanceSettings: View {
+/// Шрифт терминала — всё остальное про вид задаёт сам vv.
+struct LookSettings: View {
     @State private var config = TerminalConfigFile.load()
-    @State private var opacity = 1.0
     private let fonts = monospacedFamilies()
-    private let themes = bundledThemes()
 
     var body: some View {
         Form {
-            Section("Текст") {
-                Picker("Шрифт", selection: text("font-family", quoted: true)) {
+            Section("Шрифт") {
+                Picker("Шрифт", selection: fontFamily) {
                     Text("По умолчанию (JetBrains Mono)").tag("")
                     ForEach(fonts, id: \.self) { Text($0).tag($0) }
                 }
-                Stepper(value: number("font-size", default: defaultFontSize), in: 8...36, step: 1) {
-                    Text("Размер шрифта: \(Int(number("font-size", default: defaultFontSize).wrappedValue))")
+                Stepper(value: fontSize, in: 8...36, step: 1) {
+                    Text("Размер: \(Int(fontSize.wrappedValue))")
                 }
-            }
-
-            Section("Цвета") {
-                Picker("Оформление окна", selection: text("window-theme")) {
-                    Text("По умолчанию").tag("")
-                    Text("Как в системе").tag("system")
-                    Text("Светлое").tag("light")
-                    Text("Тёмное").tag("dark")
-                }
-                Picker("Цветовая схема", selection: text("theme", quoted: true)) {
-                    Text("По умолчанию").tag("")
-                    ForEach(themes, id: \.self) { Text($0).tag($0) }
-                }
-                LabeledContent("Прозрачность фона") {
-                    // Файл пишем, когда отпустили ползунок, а не на каждый сдвиг.
-                    Slider(value: $opacity, in: 0.3...1.0) { editing in
-                        if !editing {
-                            let value = opacity >= 0.995 ? nil : String(format: "%.2f", opacity)
-                            config.set("background-opacity", value)
-                        }
-                    }
-                }
-            }
-
-            Section("Отступы") {
-                Stepper(value: number("window-padding-x", default: 2), in: 0...40, step: 2) {
-                    Text("От краёв окна: \(Int(number("window-padding-x", default: 2).wrappedValue)) pt")
-                }
-            }
-
-            Section {
-                Button("Открыть файл настроек терминала…") { Ghostty.App.openConfig() }
-            } footer: {
-                Text("Здесь все настройки терминала, в том числе те, которых нет в этом окне.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-        .onAppear {
-            config = TerminalConfigFile.load()
-            opacity = config.value("background-opacity").flatMap(Double.init) ?? 1.0
-        }
-    }
-
-    private func text(_ key: String, quoted: Bool = false) -> Binding<String> {
-        Binding(
-            get: { config.value(key) ?? "" },
-            set: { config.set(key, $0.isEmpty ? nil : $0, quoted: quoted) })
-    }
-
-    private func number(_ key: String, default fallback: Double) -> Binding<Double> {
-        Binding(
-            get: { config.value(key).flatMap(Double.init) ?? fallback },
-            set: { value in
-                let text = value == fallback ? nil : String(Int(value))
-                config.set(key, text)
-                // Отступ одинаковый со всех сторон.
-                if key == "window-padding-x" { config.set("window-padding-y", text) }
-            })
-    }
-}
-
-struct WindowSettings: View {
-    @State private var config = TerminalConfigFile.load()
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Спрашивать перед закрытием окна, где что-то работает", isOn: flag(
-                    "confirm-close-surface", default: true))
-                Toggle("Закрывать приложение вместе с последним окном", isOn: flag(
-                    "quit-after-last-window-closed", default: false))
-            } footer: {
-                Text("Закрыл окно — все Claude в нём останавливаются. Диалоги можно продолжить потом через /resume.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .onAppear { config = TerminalConfigFile.load() }
     }
 
-    private func flag(_ key: String, default fallback: Bool) -> Binding<Bool> {
+    private var fontFamily: Binding<String> {
         Binding(
-            get: { config.value(key).map { $0 != "false" } ?? fallback },
-            set: { config.set(key, $0 == fallback ? nil : String($0)) })
+            get: { config.value("font-family") ?? "" },
+            set: { config.set("font-family", $0.isEmpty ? nil : $0, quoted: true) })
+    }
+
+    private var fontSize: Binding<Double> {
+        Binding(
+            get: { config.value("font-size").flatMap(Double.init) ?? defaultFontSize },
+            set: { config.set("font-size", $0 == defaultFontSize ? nil : String(Int($0))) })
     }
 }
 
@@ -216,12 +141,6 @@ private func monospacedFamilies() -> [String] {
     let names = NSFontManager.shared.availableFontNames(with: .fixedPitchFontMask) ?? []
     let families = Set(names.compactMap { NSFont(name: $0, size: 12)?.familyName })
     return families.filter { !$0.hasPrefix(".") }.sorted()
-}
-
-private func bundledThemes() -> [String] {
-    guard let dir = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes"),
-          let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
-    return names.filter { !$0.hasPrefix(".") }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
 }
 
 // MARK: - Claude
