@@ -3,7 +3,7 @@
 //! Всё, что печатаешь, уходит в выбранного Claude. `Ctrl-\` открывает меню,
 //! остальное — кнопками и мышью.
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, BufWriter, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -43,6 +43,14 @@ const SETTLE: Duration = Duration::from_millis(4);
 const FLASH_FOR: Duration = Duration::from_secs(5);
 
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Кадр копится в буфере и уходит в терминал одним куском.
+type Screen = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
+const FRAME_BUFFER: usize = 256 * 1024;
+/// Начало и конец кадра (DEC 2026): терминал покажет его целиком, без
+/// промежуточных состояний. Курсор на время отрисовки прячем.
+const FRAME_START: &[u8] = b"\x1b[?2026h\x1b[?25l";
+const FRAME_END: &[u8] = b"\x1b[?2026l";
 
 pub enum Event {
     Term(TermEvent),
@@ -95,7 +103,7 @@ pub fn run() -> Result<()> {
 
     setup_terminal()?;
     install_panic_hook();
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(BufWriter::with_capacity(FRAME_BUFFER, io::stdout())))?;
     let size = terminal.size()?;
     let mut app = App {
         sessions: Vec::new(),
@@ -145,12 +153,12 @@ impl App {
         self.flash = Some((text.into(), Instant::now()));
     }
 
-    fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>, rx: &Receiver<Event>) -> Result<()> {
+    fn run_loop(&mut self, terminal: &mut Screen, rx: &Receiver<Event>) -> Result<()> {
         let mut dirty = true;
         while !self.quit {
             let hold = self.current().frame_hold();
             if dirty && hold.is_none() {
-                terminal.draw(|frame| ui::draw(frame, self))?;
+                self.draw(terminal)?;
                 dirty = false;
             }
             // Если висит сообщение, проснуться, чтобы его убрать.
@@ -194,8 +202,17 @@ impl App {
         Ok(())
     }
 
+    fn draw(&self, terminal: &mut Screen) -> Result<()> {
+        terminal.backend_mut().write_all(FRAME_START)?;
+        terminal.draw(|frame| ui::draw(frame, self))?;
+        let out = terminal.backend_mut();
+        out.write_all(FRAME_END)?;
+        out.flush()?;
+        Ok(())
+    }
+
     /// Возвращает `true`, если экран надо перерисовать.
-    fn handle(&mut self, event: Event, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<bool> {
+    fn handle(&mut self, event: Event, terminal: &mut Screen) -> Result<bool> {
         match event {
             Event::Output(id, bytes) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
@@ -203,7 +220,9 @@ impl App {
                 let title_before = session.title().to_string();
                 session.process(&bytes)?;
                 if session.take_bell() {
-                    terminal.backend_mut().write_all(b"\x07")?;
+                    let out = terminal.backend_mut();
+                    out.write_all(b"\x07")?;
+                    out.flush()?;
                 }
                 Ok(index == self.selected || session.title() != title_before)
             }
@@ -437,8 +456,8 @@ impl App {
                 self.overlay = Overlay::Menu(self.selected);
                 return Ok(true);
             }
-            if let Some((_, _, action)) =
-                ui::bottom_buttons(&self.areas).into_iter().find(|(r, _, _)| contains(*r, column, row))
+            if let Some(ui::Button { action, .. }) =
+                ui::bottom_buttons(&self.areas).into_iter().find(|b| contains(b.rect, column, row))
             {
                 self.perform(action)?;
                 return Ok(true);

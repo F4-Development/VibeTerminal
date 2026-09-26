@@ -125,7 +125,9 @@ fn main() {
             }
             "dump" => {
                 let p = parser.lock().unwrap();
-                println!("──── экран ({arg}) ────");
+                let (row, col) = p.screen().cursor_position();
+                let shown = if p.screen().hide_cursor() { "скрыт" } else { "виден" };
+                println!("──── экран ({arg}) · курсор {shown}, строка {row}, колонка {col} ────");
                 for line in p.screen().contents().lines() {
                     println!("│{}", line.trim_end());
                 }

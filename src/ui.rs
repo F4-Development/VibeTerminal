@@ -26,15 +26,24 @@ const MENU_WIDTH: u16 = 46;
 const DIALOG_SIZE: (u16, u16) = (58, 7);
 const PICKER_SIZE: (u16, u16) = (90, 24);
 
-const MENU_BUTTON: &str = " ☰ Меню · Ctrl-\\ ";
-const NEW_BUTTON: &str = " + Новая сессия ";
-const BOTTOM_BUTTONS: [(&str, Action); 5] = [
-    (" + Новая сессия ", Action::New),
-    (" ✎ Имя ", Action::Rename),
-    (" ✕ Закрыть ", Action::Close),
-    (" ? Помощь ", Action::Help),
-    (" Выход ", Action::Quit),
+const MENU_BUTTON: &str = "☰ Меню  Ctrl-\\ ";
+const NEW_BUTTON: &str = "+ Новая сессия";
+/// Кнопки внизу: значок цветом Claude и подпись.
+const BOTTOM_BUTTONS: [(&str, &str, Action); 5] = [
+    ("+", "Новая сессия", Action::New),
+    ("✎", "Имя", Action::Rename),
+    ("✕", "Закрыть", Action::Close),
+    ("?", "Помощь", Action::Help),
+    ("↪", "Выход", Action::Quit),
 ];
+const BUTTON_GAP: u16 = 4;
+
+pub struct Button {
+    pub rect: Rect,
+    pub icon: &'static str,
+    pub label: &'static str,
+    pub action: Action,
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct Areas {
@@ -107,18 +116,18 @@ pub fn card_at(cards: Rect, offset: usize, column: u16, row: u16) -> Option<usiz
 }
 
 /// Кнопки внизу. «Новая сессия» здесь, только когда спрятан список, где она уже есть.
-pub fn bottom_buttons(areas: &Areas) -> Vec<(Rect, &'static str, Action)> {
+pub fn bottom_buttons(areas: &Areas) -> Vec<Button> {
     let bottom = areas.bottom;
     let mut x = bottom.x + 1;
     let mut out = Vec::new();
     let skip_new = areas.sidebar.is_some() as usize;
-    for (label, action) in BOTTOM_BUTTONS.into_iter().skip(skip_new) {
-        let w = width(label);
+    for (icon, label, action) in BOTTOM_BUTTONS.into_iter().skip(skip_new) {
+        let w = width(icon) + 1 + width(label);
         if x + w > bottom.right() {
             break;
         }
-        out.push((Rect::new(x, bottom.y, w, 1), label, action));
-        x += w + 1;
+        out.push(Button { rect: Rect::new(x, bottom.y, w, 1), icon, label, action });
+        x += w + BUTTON_GAP;
     }
     out
 }
@@ -157,9 +166,9 @@ fn dialog_rect(full: Rect) -> Rect {
 /// Подписи кнопок диалога: первая — «да», вторая — «отмена».
 pub fn dialog_labels(overlay: &Overlay) -> [&'static str; 2] {
     match overlay {
-        Overlay::Rename(_) => [" Сохранить ", " Отмена "],
-        Overlay::Confirm(Confirm::Quit) => [" Да, выйти ", " Отмена "],
-        _ => [" Да, закрыть ", " Отмена "],
+        Overlay::Rename(_) => [" Сохранить ", "Отмена"],
+        Overlay::Confirm(Confirm::Quit) => [" Да, выйти ", "Отмена"],
+        _ => [" Да, закрыть ", "Отмена"],
     }
 }
 
@@ -199,8 +208,8 @@ fn primary() -> Style {
     Style::new().fg(Color::Indexed(16)).bg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
-fn secondary() -> Style {
-    Style::new().fg(Color::Indexed(255)).bg(Color::Indexed(238))
+fn accent() -> Style {
+    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
 fn frame_block(title: &str, focused: bool) -> Block<'_> {
@@ -274,8 +283,13 @@ fn draw_top(frame: &mut Frame, app: &App) {
     let area = app.areas.top;
     let logo = Span::styled(" ✻ Vibe Vim ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
     frame.render_widget(Paragraph::new(logo), area);
-    let style = if matches!(app.overlay, Overlay::Menu(_)) { primary() } else { secondary() };
-    frame.render_widget(Paragraph::new(Span::styled(MENU_BUTTON, style)), menu_button(area));
+    let open = matches!(app.overlay, Overlay::Menu(_));
+    let button = if open {
+        Line::from(Span::styled(MENU_BUTTON, primary()))
+    } else {
+        Line::from(vec![Span::styled("☰", accent()), Span::raw(" Меню  "), Span::styled("Ctrl-\\ ", dim())])
+    };
+    frame.render_widget(Paragraph::new(button), menu_button(area));
 }
 
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
@@ -298,7 +312,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         let detail = Line::from(Span::styled(format!("  {}", session_detail(session, &app.home)), dim()));
         frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
     }
-    frame.render_widget(Paragraph::new(Span::styled(NEW_BUTTON, primary())), button);
+    frame.render_widget(Paragraph::new(Span::styled(NEW_BUTTON, accent())), button);
 }
 
 fn draw_agent(frame: &mut Frame, app: &App) {
@@ -320,9 +334,9 @@ fn draw_agent(frame: &mut Frame, app: &App) {
 fn draw_bottom(frame: &mut Frame, app: &App) {
     let area = app.areas.bottom;
     let buttons = bottom_buttons(&app.areas);
-    for (rect, label, action) in &buttons {
-        let style = if *action == Action::New { primary() } else { secondary() };
-        frame.render_widget(Paragraph::new(Span::styled(*label, style)), *rect);
+    for button in &buttons {
+        let line = Line::from(vec![Span::styled(button.icon, accent()), Span::raw(format!(" {}", button.label))]);
+        frame.render_widget(Paragraph::new(line), button.rect);
     }
 
     let note = app.flash().map(str::to_string).or_else(|| {
@@ -330,7 +344,7 @@ fn draw_bottom(frame: &mut Frame, app: &App) {
         (scrolled > 0).then(|| format!("↑ история, {scrolled} строк вверх · любая клавиша — вниз"))
     });
     if let Some(note) = note {
-        let used = buttons.last().map_or(area.x, |(rect, _, _)| rect.right());
+        let used = buttons.last().map_or(area.x, |b| b.rect.right());
         let free = area.right().saturating_sub(used + 2);
         if width(&note) <= free {
             let line = Line::from(Span::styled(format!("{note} "), Style::new().fg(Color::Yellow)));
@@ -378,7 +392,7 @@ fn draw_dialog(frame: &mut Frame, full: Rect, title: &str, lines: Vec<Line>, lab
     frame.render_widget(Paragraph::new(lines), text);
     let [yes, no] = dialog_buttons(full, labels);
     frame.render_widget(Paragraph::new(Span::styled(labels[0], primary())), yes);
-    frame.render_widget(Paragraph::new(Span::styled(labels[1], secondary())), no);
+    frame.render_widget(Paragraph::new(Span::styled(labels[1], Style::new().add_modifier(Modifier::BOLD))), no);
     text
 }
 
