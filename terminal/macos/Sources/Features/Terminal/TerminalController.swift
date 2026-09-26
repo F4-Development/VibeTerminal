@@ -384,9 +384,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if let fullscreenStyle = parentController.fullscreenStyle,
            fullscreenStyle.isFullscreen && !fullscreenStyle.supportsTabs {
             let alert = NSAlert()
-            alert.messageText = "Cannot Create New Tab"
-            alert.informativeText = "New tabs are unsupported while in non-native fullscreen. Exit fullscreen and try again."
-            alert.addButton(withTitle: "OK")
+            alert.messageText = "Вкладку не открыть"
+            alert.informativeText = "В этом полноэкранном режиме вкладок нет. Выйди из полноэкранного режима и попробуй снова."
+            alert.addButton(withTitle: "ОК")
             alert.alertStyle = .warning
             alert.beginSheetModal(for: parent)
             return nil
@@ -911,10 +911,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         let alert = NSAlert()
-        alert.messageText = "Close All Windows?"
-        alert.informativeText = "All terminal sessions will be terminated."
-        alert.addButton(withTitle: "Close All Windows")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = "Закрыть все окна?"
+        alert.informativeText = "Все сессии остановятся, в том числе Claude."
+        alert.addButton(withTitle: "Закрыть все")
+        alert.addButton(withTitle: "Отменить")
         alert.alertStyle = .warning
         alert.beginSheetModal(for: confirmWindow, completionHandler: { response in
             if response == .alertFirstButtonReturn {
@@ -1243,8 +1243,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         confirmClose(
-            messageText: "Close Tab?",
-            informativeText: "The terminal still has a running process. If you close the tab the process will be killed."
+            messageText: "Закрыть вкладку?",
+            informativeText: "В этой вкладке что-то работает. Если закрыть её, это остановится."
         ) {
             self.closeTabImmediately()
         }
@@ -1275,8 +1275,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         confirmClose(
-            messageText: "Close Other Tabs?",
-            informativeText: "At least one other tab still has a running process. If you close the tab the process will be killed."
+            messageText: "Закрыть другие вкладки?",
+            informativeText: "В других вкладках что-то работает. Если закрыть их, это остановится."
         ) {
             self.closeOtherTabsImmediately()
         }
@@ -1304,8 +1304,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         confirmClose(
-            messageText: "Close Tabs on the Right?",
-            informativeText: "At least one tab to the right still has a running process. If you close the tab the process will be killed."
+            messageText: "Закрыть вкладки справа?",
+            informativeText: "Во вкладках справа что-то работает. Если закрыть их, это остановится."
         ) {
             self.closeTabsOnTheRightImmediately()
         }
@@ -1334,8 +1334,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // We call confirmClose on the proper controller so the alert is
         // attached to the window that needs confirmation.
         confirmController.confirmClose(
-            messageText: "Close Window?",
-            informativeText: "All terminal sessions in this window will be terminated.",
+            messageText: "Закрыть окно?",
+            informativeText: "Всё, что работает в этом окне, остановится, в том числе Claude.",
         ) {
             self.closeWindowImmediately()
         }

@@ -549,7 +549,12 @@ extension Ghostty {
                 pwdChanged(app, target: target, v: action.action.pwd)
 
             case GHOSTTY_ACTION_OPEN_CONFIG:
+                // VibeTerminal: вместо текстового файла — окно настроек.
+                #if os(macOS)
+                VibeSettingsController.show()
+                #else
                 openConfig()
+                #endif
 
             case GHOSTTY_ACTION_FLOAT_WINDOW:
                 toggleFloatWindow(app, target: target, mode: action.action.float_window)
@@ -822,9 +827,9 @@ extension Ghostty {
                 guard let appState = self.appState(fromView: surfaceView) else { return }
                 guard appState.config.windowDecorations else {
                     let alert = NSAlert()
-                    alert.messageText = "Tabs are disabled"
-                    alert.informativeText = "Enable window decorations to use tabs"
-                    alert.addButton(withTitle: "OK")
+                    alert.messageText = "Вкладки выключены"
+                    alert.informativeText = "Чтобы пользоваться вкладками, включи рамку окна (window-decoration)."
+                    alert.addButton(withTitle: "ОК")
                     alert.alertStyle = .warning
                     _ = alert.runModal()
                     return

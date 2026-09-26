@@ -160,7 +160,7 @@ struct TerminalCommandPaletteView: View {
                 }
 
                 return CommandOption(
-                    title: "Focus: \(displayTitle)",
+                    title: "Перейти: \(displayTitle)",
                     subtitle: subtitle,
                     leadingIcon: "rectangle.on.rectangle",
                     leadingColor: displayColor?.displayColor.map { Color($0) },

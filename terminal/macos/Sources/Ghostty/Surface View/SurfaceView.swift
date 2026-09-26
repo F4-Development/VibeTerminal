@@ -255,10 +255,10 @@ extension Ghostty {
                     .frame(width: 128, height: 128)
 
                 VStack(alignment: .leading) {
-                    Text("Oh, no. 😭").font(.title)
+                    Text("Ой. 😭").font(.title)
                     Text("""
-                        The renderer has failed. This is usually due to exhausting
-                        available GPU memory. Please free up available resources.
+                        Не получилось отрисовать окно. Обычно так бывает, когда не хватает
+                        памяти видеокарты. Закрой лишние окна и программы.
                         """.replacingOccurrences(of: "\n", with: " ")
                     )
                     .frame(maxWidth: 350)
@@ -277,10 +277,10 @@ extension Ghostty {
                     .frame(width: 128, height: 128)
 
                 VStack(alignment: .leading) {
-                    Text("Oh, no. 😭").font(.title)
+                    Text("Ой. 😭").font(.title)
                     Text("""
-                        The terminal failed to initialize. Please check the logs for
-                        more information. This is usually a bug.
+                        Терминал не запустился. Подробности — в логах.
+                        Скорее всего, это ошибка в программе.
                         """.replacingOccurrences(of: "\n", with: " ")
                     )
                     .frame(maxWidth: 350)
@@ -412,7 +412,7 @@ extension Ghostty {
         var body: some View {
             GeometryReader { geo in
                 HStack(spacing: 4) {
-                    TextField("Search", text: $searchState.needle)
+                    TextField("Поиск", text: $searchState.needle)
                     .textFieldStyle(.plain)
                     .frame(width: 180)
                     .padding(.leading, 8)
@@ -893,9 +893,9 @@ extension Ghostty {
                 VStack(alignment: .leading, spacing: 8) {
                     if !keyTables.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            Label("Key Table", systemImage: "keyboard.badge.ellipsis")
+                            Label("Таблица клавиш", systemImage: "keyboard.badge.ellipsis")
                                 .font(.headline)
-                            Text("A key table is a named set of keybindings, activated by some other key. Keys are interpreted using this table until it is deactivated.")
+                            Text("Включён отдельный набор сочетаний клавиш. Клавиши работают по нему, пока его не выключат.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -907,9 +907,9 @@ extension Ghostty {
 
                     if !keySequence.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            Label("Key Sequence", systemImage: "character.cursor.ibeam")
+                            Label("Сочетание клавиш", systemImage: "character.cursor.ibeam")
                                 .font(.headline)
-                            Text("A key sequence is a series of key presses that trigger an action. A pending key sequence is currently active.")
+                            Text("Начато сочетание из нескольких нажатий — ждём следующую клавишу.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -1071,7 +1071,7 @@ extension Ghostty {
                     HStack(spacing: 5) {
                         Image(systemName: "eye.fill")
                             .font(.system(size: 12))
-                        Text("Read-only")
+                        Text("Только чтение")
                             .font(.system(size: 12, weight: .medium))
                     }
                     .padding(.horizontal, 8)
@@ -1091,7 +1091,7 @@ extension Ghostty {
                 Spacer()
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Read-only terminal")
+            .accessibilityLabel("Терминал только для чтения")
         }
 
         private var badgeBackground: some View {
@@ -1115,11 +1115,11 @@ extension Ghostty {
                         Image(systemName: "eye.fill")
                             .foregroundColor(.orange)
                             .font(.system(size: 13))
-                        Text("Read-Only Mode")
+                        Text("Только чтение")
                             .font(.system(size: 13, weight: .semibold))
                     }
 
-                    Text("This terminal is in read-only mode. You can still view, select, and scroll through the content, but no input events will be sent to the running application.")
+                    Text("Можно смотреть, выделять и листать, но нажатия клавиш в программу не уходят.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1128,7 +1128,7 @@ extension Ghostty {
                 HStack {
                     Spacer()
 
-                    Button("Disable") {
+                    Button("Выключить") {
                         onDisable()
                         isPresented = false
                     }

@@ -35,9 +35,9 @@ class ClipboardConfirmationController: NSWindowController {
 
         switch request {
         case .paste:
-            window.title = "Warning: Potentially Unsafe Paste"
+            window.title = "Осторожно: вставка может быть опасной"
         case .osc_52_read, .osc_52_write:
-            window.title = "Authorize Clipboard Access"
+            window.title = "Доступ к буферу обмена"
         }
 
         window.contentView = NSHostingView(rootView: ClipboardConfirmationView(

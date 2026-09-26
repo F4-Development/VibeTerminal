@@ -647,7 +647,7 @@ extension TerminalWindow {
                             .foregroundColor(viewModel.isMainWindow ? .accentColor : .secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Reset Split Zoom")
+                    .help("Вернуть обычный размер панели")
                     .frame(width: 20, height: 20)
                     Spacer()
                 }
@@ -716,7 +716,7 @@ extension TerminalWindow {
             .flatMap { $0.windowController as? TerminalController }
 
         // Close tabs to the right
-        let item = NSMenuItem(title: "Close Tabs to the Right", action: #selector(TerminalController.closeTabsOnTheRight(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: "Закрыть вкладки справа", action: #selector(TerminalController.closeTabsOnTheRight(_:)), keyEquivalent: "")
         item.identifier = Self.closeTabsOnRightMenuItemIdentifier
         item.target = targetController
         item.setImageIfDesired(systemSymbolName: "xmark")
@@ -763,7 +763,7 @@ extension TerminalWindow {
         menu.addItem(separator)
 
         // Rename Tab...
-        let changeTitleItem = NSMenuItem(title: "Rename Tab...", action: #selector(TerminalWindow.renameTabFromContextMenu(_:)), keyEquivalent: "")
+        let changeTitleItem = NSMenuItem(title: "Переименовать вкладку…", action: #selector(TerminalWindow.renameTabFromContextMenu(_:)), keyEquivalent: "")
         changeTitleItem.identifier = Self.changeTitleMenuItemIdentifier
         changeTitleItem.target = self
         changeTitleItem.representedObject = target?.window

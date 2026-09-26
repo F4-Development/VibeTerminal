@@ -1,0 +1,17 @@
+/* Русские тексты системных окон macOS для VibeTerminal. Кладутся в приложение при сборке. */
+"CFBundleName" = "VibeTerminal";
+"CFBundleDisplayName" = "VibeTerminal";
+"NSAppleEventsUsageDescription" = "Программа в VibeTerminal хочет управлять другими приложениями через AppleScript.";
+"NSAudioCaptureUsageDescription" = "Программа в VibeTerminal хочет записывать системный звук.";
+"NSBluetoothAlwaysUsageDescription" = "Программа в VibeTerminal хочет использовать Bluetooth.";
+"NSCalendarsUsageDescription" = "Программа в VibeTerminal хочет получить доступ к календарю.";
+"NSCameraUsageDescription" = "Программа в VibeTerminal хочет использовать камеру.";
+"NSContactsUsageDescription" = "Программа в VibeTerminal хочет получить доступ к контактам.";
+"NSLocalNetworkUsageDescription" = "Программа в VibeTerminal хочет получить доступ к локальной сети.";
+"NSLocationUsageDescription" = "Программа в VibeTerminal хочет узнать ваше местоположение.";
+"NSMicrophoneUsageDescription" = "Программа в VibeTerminal хочет использовать микрофон.";
+"NSMotionUsageDescription" = "Программа в VibeTerminal хочет получить данные о движении.";
+"NSPhotoLibraryUsageDescription" = "Программа в VibeTerminal хочет получить доступ к фотографиям.";
+"NSRemindersUsageDescription" = "Программа в VibeTerminal хочет получить доступ к напоминаниям.";
+"NSSpeechRecognitionUsageDescription" = "Программа в VibeTerminal хочет распознавать речь.";
+"NSSystemAdministrationUsageDescription" = "Программе в VibeTerminal нужны права администратора.";

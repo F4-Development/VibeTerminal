@@ -24,6 +24,15 @@ cp "$ROOT/target/release/vv" "$OUT/Contents/MacOS/vv"
 # (Ghostty). Меняем в готовом приложении, чтобы не трогать сборку Ghostty.
 /usr/libexec/PlistBuddy -c "Set :CFBundleName VibeTerminal" "$OUT/Contents/Info.plist"
 
+# Приложение русскоязычное: системные пункты меню и окна macOS — по-русски,
+# тексты запросов доступа (микрофон и т.п.) — из assets/app/ru.lproj.
+PLIST="$OUT/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :CFBundleDevelopmentRegion" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :CFBundleDevelopmentRegion string ru" "$PLIST"
+/usr/libexec/PlistBuddy -c "Delete :CFBundleLocalizations" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations array" -c "Add :CFBundleLocalizations:0 string ru" "$PLIST"
+cp -R "$ROOT/assets/app/ru.lproj" "$OUT/Contents/Resources/"
+
 # Подпись для запуска на этом маке: сначала vv, потом всё приложение,
 # сохраняя entitlements, с которыми его подписал Xcode.
 codesign --force --sign - "$OUT/Contents/MacOS/vv"

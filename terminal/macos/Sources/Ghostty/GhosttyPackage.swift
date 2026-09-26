@@ -262,17 +262,17 @@ extension Ghostty {
             switch self {
             case .paste:
                 return """
-                Pasting this text to the terminal may be dangerous as it looks like some commands may be executed.
+                Похоже, в этом тексте есть команды, и при вставке они могут выполниться.
                 """
             case .osc_52_read:
                 return """
-                An application is attempting to read from the clipboard.
-                The current clipboard contents are shown below.
+                Программа хочет прочитать буфер обмена.
+                Ниже — что в нём сейчас.
                 """
             case .osc_52_write:
                 return """
-                An application is attempting to write to the clipboard.
-                The content to write is shown below.
+                Программа хочет записать в буфер обмена.
+                Ниже — что именно.
                 """
             }
         }

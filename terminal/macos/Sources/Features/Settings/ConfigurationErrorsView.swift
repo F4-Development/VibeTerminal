@@ -17,8 +17,8 @@ struct ConfigurationErrorsView<ViewModel: ConfigurationErrorsViewModel>: View {
                     .frame(alignment: .center)
 
                 Text("""
-                    ^[\(model.errors.count) error(s) were](inflect: true) found while loading the configuration. \
-                    Please review the errors below and reload your configuration or ignore the erroneous lines.
+                    В файле настроек нашлись ошибки: \(model.errors.count). \
+                    Исправь их и перечитай настройки или пропусти эти строки.
                     """)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
@@ -45,8 +45,8 @@ struct ConfigurationErrorsView<ViewModel: ConfigurationErrorsViewModel>: View {
 
             HStack {
                 Spacer()
-                Button("Ignore") { model.errors = [] }
-                Button("Reload Configuration") { reloadConfig() }
+                Button("Пропустить") { model.errors = [] }
+                Button("Перечитать настройки") { reloadConfig() }
             }
             .padding([.bottom, .trailing])
         }

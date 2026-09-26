@@ -29,7 +29,7 @@ class PermissionRequest {
         _ key: String,
         message: String,
         informative: String = "",
-        allowText: String = "Allow",
+        allowText: String = "Разрешить",
         allowDuration: AllowDuration = .once,
         rememberDuration: Duration? = .seconds(86400),
         window: NSWindow? = nil,
@@ -48,7 +48,7 @@ class PermissionRequest {
 
         // Add buttons (they appear in reverse order)
         alert.addButton(withTitle: allowText)
-        alert.addButton(withTitle: "Don't Allow")
+        alert.addButton(withTitle: "Не разрешать")
 
         // Create checkbox for remembering if duration is provided
         var checkbox: NSButton?
@@ -166,18 +166,19 @@ class PermissionRequest {
         // going to have to redo this for that.
         switch seconds {
         case 0..<60:
-            return "Remember my decision for \(Int(seconds)) seconds"
+            let value = Int(seconds)
+            return "Запомнить решение на \(value) \(russianPlural(value, "секунду", "секунды", "секунд"))"
         case 60..<3600:
             let minutes = Int(seconds / 60)
-            return "Remember my decision for \(minutes) minute\(minutes == 1 ? "" : "s")"
+            return "Запомнить решение на \(minutes) \(russianPlural(minutes, "минуту", "минуты", "минут"))"
         case 3600..<86400:
             let hours = Int(seconds / 3600)
-            return "Remember my decision for \(hours) hour\(hours == 1 ? "" : "s")"
+            return "Запомнить решение на \(hours) \(russianPlural(hours, "час", "часа", "часов"))"
         case 86400:
-            return "Remember my decision for one day"
+            return "Запомнить решение на сутки"
         default:
             let days = Int(seconds / 86400)
-            return "Remember my decision for \(days) day\(days == 1 ? "" : "s")"
+            return "Запомнить решение на \(days) \(russianPlural(days, "день", "дня", "дней"))"
         }
     }
 
@@ -209,5 +210,16 @@ class PermissionRequest {
             coder.encode(result, forKey: "result")
             coder.encode(expiry, forKey: "expiry")
         }
+    }
+}
+
+/// «1 минуту», «2 минуты», «5 минут».
+private func russianPlural(_ n: Int, _ one: String, _ few: String, _ many: String) -> String {
+    let last2 = n % 100, last = n % 10
+    if (11...14).contains(last2) { return many }
+    switch last {
+    case 1: return one
+    case 2...4: return few
+    default: return many
     }
 }

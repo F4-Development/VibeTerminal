@@ -67,7 +67,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     var body: some View {
         switch ghostty.readiness {
         case .loading:
-            Text("Loading")
+            Text("Загрузка")
         case .error:
             ErrorView()
         case .ready:

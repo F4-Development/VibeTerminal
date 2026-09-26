@@ -137,155 +137,155 @@ fn actionCommands(action: Action.Key) []const Command {
 
         .reset => comptime &.{.{
             .action = .reset,
-            .title = "Reset Terminal",
-            .description = "Reset the terminal to a clean state.",
+            .title = "Сбросить терминал",
+            .description = "Вернуть терминал в чистое состояние.",
         }},
 
         .copy_to_clipboard => comptime &.{ .{
             .action = .{ .copy_to_clipboard = .mixed },
-            .title = "Copy to Clipboard",
-            .description = "Copy the selected text to the clipboard in both plain and styled formats.",
+            .title = "Скопировать",
+            .description = "Скопировать выделенное в буфер обмена — и простым текстом, и с оформлением.",
         }, .{
             .action = .{ .copy_to_clipboard = .plain },
-            .title = "Copy Selection as Plain Text to Clipboard",
-            .description = "Copy the selected text as plain text to the clipboard.",
+            .title = "Скопировать выделенное как простой текст",
+            .description = "Скопировать выделенное в буфер обмена без оформления.",
         }, .{
             .action = .{ .copy_to_clipboard = .vt },
-            .title = "Copy Selection as ANSI Sequences to Clipboard",
-            .description = "Copy the selected text as ANSI escape sequences to the clipboard.",
+            .title = "Скопировать выделенное с ANSI-кодами",
+            .description = "Скопировать выделенное в буфер обмена вместе с управляющими ANSI-кодами.",
         }, .{
             .action = .{ .copy_to_clipboard = .html },
-            .title = "Copy Selection as HTML to Clipboard",
-            .description = "Copy the selected text as HTML to the clipboard.",
+            .title = "Скопировать выделенное как HTML",
+            .description = "Скопировать выделенное в буфер обмена в формате HTML.",
         } },
 
         .copy_url_to_clipboard => comptime &.{.{
             .action = .copy_url_to_clipboard,
-            .title = "Copy URL to Clipboard",
-            .description = "Copy the URL under the cursor to the clipboard.",
+            .title = "Скопировать ссылку",
+            .description = "Скопировать ссылку под курсором в буфер обмена.",
         }},
 
         .copy_title_to_clipboard => comptime &.{.{
             .action = .copy_title_to_clipboard,
-            .title = "Copy Terminal Title to Clipboard",
-            .description = "Copy the terminal title to the clipboard. If the terminal title is not set this has no effect.",
+            .title = "Скопировать заголовок терминала",
+            .description = "Скопировать заголовок терминала в буфер обмена, если он задан.",
         }},
 
         .paste_from_clipboard => comptime &.{.{
             .action = .paste_from_clipboard,
-            .title = "Paste from Clipboard",
-            .description = "Paste the contents of the main clipboard.",
+            .title = "Вставить",
+            .description = "Вставить из буфера обмена.",
         }},
 
         .paste_from_selection => comptime &.{.{
             .action = .paste_from_selection,
-            .title = "Paste from Selection",
-            .description = "Paste the contents of the selection clipboard.",
+            .title = "Вставить выделенное",
+            .description = "Вставить текст из буфера выделения.",
         }},
 
         .start_search => comptime &.{.{
             .action = .start_search,
-            .title = "Start Search",
-            .description = "Start a search if one isn't already active.",
+            .title = "Найти",
+            .description = "Открыть поиск, если он ещё не открыт.",
         }},
 
         .search_selection => comptime &.{.{
             .action = .search_selection,
-            .title = "Search Selection",
-            .description = "Start a search for the current text selection.",
+            .title = "Найти выделенное",
+            .description = "Искать выделенный текст.",
         }},
 
         .end_search => comptime &.{.{
             .action = .end_search,
-            .title = "End Search",
-            .description = "End the current search if any and hide any GUI elements.",
+            .title = "Закрыть поиск",
+            .description = "Закончить поиск и скрыть его панель.",
         }},
 
         .navigate_search => comptime &.{ .{
             .action = .{ .navigate_search = .next },
-            .title = "Next Search Result",
-            .description = "Navigate to the next search result, if any.",
+            .title = "Следующее совпадение",
+            .description = "Перейти к следующему найденному.",
         }, .{
             .action = .{ .navigate_search = .previous },
-            .title = "Previous Search Result",
-            .description = "Navigate to the previous search result, if any.",
+            .title = "Предыдущее совпадение",
+            .description = "Перейти к предыдущему найденному.",
         } },
 
         .increase_font_size => comptime &.{.{
             .action = .{ .increase_font_size = 1 },
-            .title = "Increase Font Size",
-            .description = "Increase the font size by 1 point.",
+            .title = "Увеличить шрифт",
+            .description = "Увеличить шрифт на 1 пункт.",
         }},
 
         .decrease_font_size => comptime &.{.{
             .action = .{ .decrease_font_size = 1 },
-            .title = "Decrease Font Size",
-            .description = "Decrease the font size by 1 point.",
+            .title = "Уменьшить шрифт",
+            .description = "Уменьшить шрифт на 1 пункт.",
         }},
 
         .reset_font_size => comptime &.{.{
             .action = .reset_font_size,
-            .title = "Reset Font Size",
-            .description = "Reset the font size to the default.",
+            .title = "Обычный размер шрифта",
+            .description = "Вернуть размер шрифта из настроек.",
         }},
 
         .clear_screen => comptime &.{.{
             .action = .clear_screen,
-            .title = "Clear Screen",
-            .description = "Clear the screen and scrollback.",
+            .title = "Очистить экран",
+            .description = "Очистить экран и историю прокрутки.",
         }},
 
         .select_all => comptime &.{.{
             .action = .select_all,
-            .title = "Select All",
-            .description = "Select all text on the screen.",
+            .title = "Выбрать все",
+            .description = "Выделить весь текст на экране.",
         }},
 
         .scroll_to_top => comptime &.{.{
             .action = .scroll_to_top,
-            .title = "Scroll to Top",
-            .description = "Scroll to the top of the screen.",
+            .title = "В начало",
+            .description = "Прокрутить в самое начало.",
         }},
 
         .scroll_to_bottom => comptime &.{.{
             .action = .scroll_to_bottom,
-            .title = "Scroll to Bottom",
-            .description = "Scroll to the bottom of the screen.",
+            .title = "В конец",
+            .description = "Прокрутить в самый конец.",
         }},
 
         .scroll_to_selection => comptime &.{.{
             .action = .scroll_to_selection,
-            .title = "Scroll to Selection",
-            .description = "Scroll to the selected text.",
+            .title = "К выделенному",
+            .description = "Прокрутить к выделенному тексту.",
         }},
 
         .scroll_page_up => comptime &.{.{
             .action = .scroll_page_up,
-            .title = "Scroll Page Up",
-            .description = "Scroll the screen up by a page.",
+            .title = "Страница вверх",
+            .description = "Прокрутить на страницу вверх.",
         }},
 
         .scroll_page_down => comptime &.{.{
             .action = .scroll_page_down,
-            .title = "Scroll Page Down",
-            .description = "Scroll the screen down by a page.",
+            .title = "Страница вниз",
+            .description = "Прокрутить на страницу вниз.",
         }},
 
         .write_screen_file => comptime &.{
             .{
                 .action = .{ .write_screen_file = .copy },
-                .title = "Copy Screen to Temporary File and Copy Path",
-                .description = "Copy the screen contents to a temporary file and copy the path to the clipboard.",
+                .title = "Экран во временный файл — скопировать путь",
+                .description = "Сохранить содержимое экрана во временный файл и скопировать путь к нему.",
             },
             .{
                 .action = .{ .write_screen_file = .paste },
-                .title = "Copy Screen to Temporary File and Paste Path",
-                .description = "Copy the screen contents to a temporary file and paste the path to the file.",
+                .title = "Экран во временный файл — вставить путь",
+                .description = "Сохранить содержимое экрана во временный файл и вставить путь к нему.",
             },
             .{
                 .action = .{ .write_screen_file = .open },
-                .title = "Copy Screen to Temporary File and Open",
-                .description = "Copy the screen contents to a temporary file and open it.",
+                .title = "Экран во временный файл — открыть",
+                .description = "Сохранить содержимое экрана во временный файл и открыть его.",
             },
 
             .{
@@ -293,24 +293,24 @@ fn actionCommands(action: Action.Key) []const Command {
                     .action = .copy,
                     .emit = .html,
                 } },
-                .title = "Copy Screen as HTML to Temporary File and Copy Path",
-                .description = "Copy the screen contents as HTML to a temporary file and copy the path to the clipboard.",
+                .title = "Экран в HTML-файл — скопировать путь",
+                .description = "Сохранить экран как HTML во временный файл и скопировать путь к нему.",
             },
             .{
                 .action = .{ .write_screen_file = .{
                     .action = .paste,
                     .emit = .html,
                 } },
-                .title = "Copy Screen as HTML to Temporary File and Paste Path",
-                .description = "Copy the screen contents as HTML to a temporary file and paste the path to the file.",
+                .title = "Экран в HTML-файл — вставить путь",
+                .description = "Сохранить экран как HTML во временный файл и вставить путь к нему.",
             },
             .{
                 .action = .{ .write_screen_file = .{
                     .action = .open,
                     .emit = .html,
                 } },
-                .title = "Copy Screen as HTML to Temporary File and Open",
-                .description = "Copy the screen contents as HTML to a temporary file and open it.",
+                .title = "Экран в HTML-файл — открыть",
+                .description = "Сохранить экран как HTML во временный файл и открыть его.",
             },
 
             .{
@@ -318,42 +318,42 @@ fn actionCommands(action: Action.Key) []const Command {
                     .action = .copy,
                     .emit = .vt,
                 } },
-                .title = "Copy Screen as ANSI Sequences to Temporary File and Copy Path",
-                .description = "Copy the screen contents as ANSI escape sequences to a temporary file and copy the path to the clipboard.",
+                .title = "Экран с ANSI-кодами в файл — скопировать путь",
+                .description = "Сохранить экран с ANSI-кодами во временный файл и скопировать путь к нему.",
             },
             .{
                 .action = .{ .write_screen_file = .{
                     .action = .paste,
                     .emit = .vt,
                 } },
-                .title = "Copy Screen as ANSI Sequences to Temporary File and Paste Path",
-                .description = "Copy the screen contents as ANSI escape sequences to a temporary file and paste the path to the file.",
+                .title = "Экран с ANSI-кодами в файл — вставить путь",
+                .description = "Сохранить экран с ANSI-кодами во временный файл и вставить путь к нему.",
             },
             .{
                 .action = .{ .write_screen_file = .{
                     .action = .open,
                     .emit = .vt,
                 } },
-                .title = "Copy Screen as ANSI Sequences to Temporary File and Open",
-                .description = "Copy the screen contents as ANSI escape sequences to a temporary file and open it.",
+                .title = "Экран с ANSI-кодами в файл — открыть",
+                .description = "Сохранить экран с ANSI-кодами во временный файл и открыть его.",
             },
         },
 
         .write_selection_file => comptime &.{
             .{
                 .action = .{ .write_selection_file = .copy },
-                .title = "Copy Selection to Temporary File and Copy Path",
-                .description = "Copy the selection contents to a temporary file and copy the path to the clipboard.",
+                .title = "Выделенное во временный файл — скопировать путь",
+                .description = "Сохранить выделенное во временный файл и скопировать путь к нему.",
             },
             .{
                 .action = .{ .write_selection_file = .paste },
-                .title = "Copy Selection to Temporary File and Paste Path",
-                .description = "Copy the selection contents to a temporary file and paste the path to the file.",
+                .title = "Выделенное во временный файл — вставить путь",
+                .description = "Сохранить выделенное во временный файл и вставить путь к нему.",
             },
             .{
                 .action = .{ .write_selection_file = .open },
-                .title = "Copy Selection to Temporary File and Open",
-                .description = "Copy the selection contents to a temporary file and open it.",
+                .title = "Выделенное во временный файл — открыть",
+                .description = "Сохранить выделенное во временный файл и открыть его.",
             },
 
             .{
@@ -361,24 +361,24 @@ fn actionCommands(action: Action.Key) []const Command {
                     .action = .copy,
                     .emit = .html,
                 } },
-                .title = "Copy Selection as HTML to Temporary File and Copy Path",
-                .description = "Copy the selection contents as HTML to a temporary file and copy the path to the clipboard.",
+                .title = "Выделенное в HTML-файл — скопировать путь",
+                .description = "Сохранить выделенное как HTML во временный файл и скопировать путь к нему.",
             },
             .{
                 .action = .{ .write_selection_file = .{
                     .action = .paste,
                     .emit = .html,
                 } },
-                .title = "Copy Selection as HTML to Temporary File and Paste Path",
-                .description = "Copy the selection contents as HTML to a temporary file and paste the path to the file.",
+                .title = "Выделенное в HTML-файл — вставить путь",
+                .description = "Сохранить выделенное как HTML во временный файл и вставить путь к нему.",
             },
             .{
                 .action = .{ .write_selection_file = .{
                     .action = .open,
                     .emit = .html,
                 } },
-                .title = "Copy Selection as HTML to Temporary File and Open",
-                .description = "Copy the selection contents as HTML to a temporary file and open it.",
+                .title = "Выделенное в HTML-файл — открыть",
+                .description = "Сохранить выделенное как HTML во временный файл и открыть его.",
             },
 
             .{
@@ -386,299 +386,296 @@ fn actionCommands(action: Action.Key) []const Command {
                     .action = .copy,
                     .emit = .vt,
                 } },
-                .title = "Copy Selection as ANSI Sequences to Temporary File and Copy Path",
-                .description = "Copy the selection contents as ANSI escape sequences to a temporary file and copy the path to the clipboard.",
+                .title = "Выделенное с ANSI-кодами в файл — скопировать путь",
+                .description = "Сохранить выделенное с ANSI-кодами во временный файл и скопировать путь к нему.",
             },
             .{
                 .action = .{ .write_selection_file = .{
                     .action = .paste,
                     .emit = .vt,
                 } },
-                .title = "Copy Selection as ANSI Sequences to Temporary File and Paste Path",
-                .description = "Copy the selection contents as ANSI escape sequences to a temporary file and paste the path to the file.",
+                .title = "Выделенное с ANSI-кодами в файл — вставить путь",
+                .description = "Сохранить выделенное с ANSI-кодами во временный файл и вставить путь к нему.",
             },
             .{
                 .action = .{ .write_selection_file = .{
                     .action = .open,
                     .emit = .vt,
                 } },
-                .title = "Copy Selection as ANSI Sequences to Temporary File and Open",
-                .description = "Copy the selection contents as ANSI escape sequences to a temporary file and open it.",
+                .title = "Выделенное с ANSI-кодами в файл — открыть",
+                .description = "Сохранить выделенное с ANSI-кодами во временный файл и открыть его.",
             },
         },
 
         .new_window => comptime &.{.{
             .action = .new_window,
-            .title = "New Window",
-            .description = "Open a new window.",
+            .title = "Новое окно",
+            .description = "Открыть новое окно.",
         }},
 
         .new_tab => comptime &.{.{
             .action = .new_tab,
-            .title = "New Tab",
-            .description = "Open a new tab.",
+            .title = "Новая вкладка",
+            .description = "Открыть новую вкладку.",
         }},
 
         .move_tab => comptime &.{
             .{
                 .action = .{ .move_tab = -1 },
-                .title = "Move Tab Left",
-                .description = "Move the current tab to the left.",
+                .title = "Вкладку влево",
+                .description = "Передвинуть вкладку влево.",
             },
             .{
                 .action = .{ .move_tab = 1 },
-                .title = "Move Tab Right",
-                .description = "Move the current tab to the right.",
+                .title = "Вкладку вправо",
+                .description = "Передвинуть вкладку вправо.",
             },
         },
 
         .toggle_tab_overview => comptime &.{.{
             .action = .toggle_tab_overview,
-            .title = "Toggle Tab Overview",
-            .description = "Toggle the tab overview.",
+            .title = "Обзор вкладок",
+            .description = "Показать или скрыть обзор вкладок.",
         }},
 
         .prompt_surface_title => comptime &.{.{
             .action = .prompt_surface_title,
-            .title = "Change Terminal Title…",
-            .description = "Prompt for a new title for the current terminal.",
+            .title = "Изменить заголовок терминала…",
+            .description = "Задать новый заголовок этому терминалу.",
         }},
 
         .prompt_tab_title => comptime &.{.{
             .action = .prompt_tab_title,
-            .title = "Change Tab Title…",
-            .description = "Prompt for a new title for the current tab.",
+            .title = "Изменить название вкладки…",
+            .description = "Задать новое название этой вкладке.",
         }},
 
         .new_split => comptime &.{
             .{
                 .action = .{ .new_split = .left },
-                .title = "Split Left",
-                .description = "Split the terminal to the left.",
+                .title = "Разделить влево",
+                .description = "Открыть новую панель слева.",
             },
             .{
                 .action = .{ .new_split = .right },
-                .title = "Split Right",
-                .description = "Split the terminal to the right.",
+                .title = "Разделить вправо",
+                .description = "Открыть новую панель справа.",
             },
             .{
                 .action = .{ .new_split = .up },
-                .title = "Split Up",
-                .description = "Split the terminal up.",
+                .title = "Разделить вверх",
+                .description = "Открыть новую панель сверху.",
             },
             .{
                 .action = .{ .new_split = .down },
-                .title = "Split Down",
-                .description = "Split the terminal down.",
+                .title = "Разделить вниз",
+                .description = "Открыть новую панель снизу.",
             },
         },
 
         .goto_split => comptime &.{
             .{
                 .action = .{ .goto_split = .previous },
-                .title = "Focus Split: Previous",
-                .description = "Focus the previous split, if any.",
+                .title = "Панель: предыдущая",
+                .description = "Перейти к предыдущей панели.",
             },
             .{
                 .action = .{ .goto_split = .next },
-                .title = "Focus Split: Next",
-                .description = "Focus the next split, if any.",
+                .title = "Панель: следующая",
+                .description = "Перейти к следующей панели.",
             },
             .{
                 .action = .{ .goto_split = .left },
-                .title = "Focus Split: Left",
-                .description = "Focus the split to the left, if it exists.",
+                .title = "Панель: слева",
+                .description = "Перейти к панели слева.",
             },
             .{
                 .action = .{ .goto_split = .right },
-                .title = "Focus Split: Right",
-                .description = "Focus the split to the right, if it exists.",
+                .title = "Панель: справа",
+                .description = "Перейти к панели справа.",
             },
             .{
                 .action = .{ .goto_split = .up },
-                .title = "Focus Split: Up",
-                .description = "Focus the split above, if it exists.",
+                .title = "Панель: сверху",
+                .description = "Перейти к панели сверху.",
             },
             .{
                 .action = .{ .goto_split = .down },
-                .title = "Focus Split: Down",
-                .description = "Focus the split below, if it exists.",
+                .title = "Панель: снизу",
+                .description = "Перейти к панели снизу.",
             },
         },
 
         .goto_window => comptime &.{
             .{
                 .action = .{ .goto_window = .previous },
-                .title = "Focus Window: Previous",
-                .description = "Focus the previous window, if any.",
+                .title = "Окно: предыдущее",
+                .description = "Перейти к предыдущему окну.",
             },
             .{
                 .action = .{ .goto_window = .next },
-                .title = "Focus Window: Next",
-                .description = "Focus the next window, if any.",
+                .title = "Окно: следующее",
+                .description = "Перейти к следующему окну.",
             },
         },
 
         .toggle_split_zoom => comptime &.{.{
             .action = .toggle_split_zoom,
-            .title = "Toggle Split Zoom",
-            .description = "Toggle the zoom state of the current split.",
+            .title = "Развернуть панель",
+            .description = "Развернуть панель на всё окно или вернуть как было.",
         }},
 
         .toggle_readonly => comptime &.{.{
             .action = .toggle_readonly,
-            .title = "Toggle Read-Only Mode",
-            .description = "Toggle read-only mode for the current surface.",
+            .title = "Только чтение",
+            .description = "Включить или выключить режим только для чтения.",
         }},
 
         .equalize_splits => comptime &.{.{
             .action = .equalize_splits,
-            .title = "Equalize Splits",
-            .description = "Equalize the size of all splits.",
+            .title = "Выровнять панели",
+            .description = "Сделать все панели одного размера.",
         }},
 
         .reset_window_size => comptime &.{.{
             .action = .reset_window_size,
-            .title = "Reset Window Size",
-            .description = "Reset the window size to the default.",
+            .title = "Исходный размер окна",
+            .description = "Вернуть окну размер по умолчанию.",
         }},
 
         .inspector => comptime &.{.{
             .action = .{ .inspector = .toggle },
-            .title = "Toggle Inspector",
-            .description = "Toggle the inspector.",
+            .title = "Инспектор терминала",
+            .description = "Показать или скрыть инспектор терминала.",
         }},
 
         .show_gtk_inspector => comptime &.{.{
             .action = .show_gtk_inspector,
-            .title = "Show the GTK Inspector",
-            .description = "Show the GTK inspector.",
+            .title = "Инспектор GTK",
+            .description = "Показать инспектор GTK.",
         }},
 
         .show_on_screen_keyboard => comptime &.{.{
             .action = .show_on_screen_keyboard,
-            .title = "Show On-Screen Keyboard",
-            .description = "Show the on-screen keyboard if present.",
+            .title = "Экранная клавиатура",
+            .description = "Показать экранную клавиатуру, если она есть.",
         }},
 
         .open_config => comptime &.{.{
             .action = .open_config,
-            .title = "Open Config",
-            .description = "Open the config file.",
+            .title = "Настройки",
+            .description = "Открыть окно настроек.",
         }},
 
         .reload_config => comptime &.{.{
             .action = .reload_config,
-            .title = "Reload Config",
-            .description = "Reload the config file.",
+            .title = "Перечитать настройки",
+            .description = "Заново прочитать файл настроек.",
         }},
 
         .close_surface => comptime &.{.{
             .action = .close_surface,
-            .title = "Close Terminal",
-            .description = "Close the current terminal.",
+            .title = "Закрыть терминал",
+            .description = "Закрыть этот терминал.",
         }},
 
         .close_tab => comptime &.{
             .{
                 .action = .{ .close_tab = .this },
-                .title = "Close Tab",
-                .description = "Close the current tab.",
+                .title = "Закрыть вкладку",
+                .description = "Закрыть эту вкладку.",
             },
             .{
                 .action = .{ .close_tab = .other },
-                .title = "Close Other Tabs",
-                .description = "Close all tabs in this window except the current one.",
+                .title = "Закрыть другие вкладки",
+                .description = "Закрыть в этом окне все вкладки, кроме текущей.",
             },
             .{
                 .action = .{ .close_tab = .right },
-                .title = "Close Tabs to the Right",
-                .description = "Close all tabs to the right of the current one.",
+                .title = "Закрыть вкладки справа",
+                .description = "Закрыть все вкладки правее текущей.",
             },
         },
 
         .close_window => comptime &.{.{
             .action = .close_window,
-            .title = "Close Window",
-            .description = "Close the current window.",
+            .title = "Закрыть окно",
+            .description = "Закрыть это окно.",
         }},
 
         .close_all_windows => comptime &.{.{
             .action = .close_all_windows,
-            .title = "Close All Windows",
-            .description = "Close all windows.",
+            .title = "Закрыть все окна",
+            .description = "Закрыть все окна.",
         }},
 
         .toggle_maximize => comptime &.{.{
             .action = .toggle_maximize,
-            .title = "Toggle Maximize",
-            .description = "Toggle the maximized state of the current window.",
+            .title = "Развернуть окно",
+            .description = "Развернуть окно или вернуть прежний размер.",
         }},
 
         .toggle_fullscreen => comptime &.{.{
             .action = .toggle_fullscreen,
-            .title = "Toggle Fullscreen",
-            .description = "Toggle the fullscreen state of the current window.",
+            .title = "Полноэкранный режим",
+            .description = "Включить или выключить полноэкранный режим.",
         }},
 
         .toggle_window_decorations => comptime &.{.{
             .action = .toggle_window_decorations,
-            .title = "Toggle Window Decorations",
-            .description = "Toggle the window decorations.",
+            .title = "Рамка окна",
+            .description = "Показать или скрыть рамку окна.",
         }},
 
         .toggle_window_float_on_top => comptime &.{.{
             .action = .toggle_window_float_on_top,
-            .title = "Toggle Float on Top",
-            .description = "Toggle the float on top state of the current window.",
+            .title = "Поверх всех окон",
+            .description = "Держать окно поверх остальных или нет.",
         }},
 
         .toggle_secure_input => comptime &.{.{
             .action = .toggle_secure_input,
-            .title = "Toggle Secure Input",
-            .description = "Toggle secure input mode.",
+            .title = "Защищённый ввод",
+            .description = "Включить или выключить защищённый ввод с клавиатуры.",
         }},
 
         .toggle_mouse_reporting => comptime &.{.{
             .action = .toggle_mouse_reporting,
-            .title = "Toggle Mouse Reporting",
-            .description = "Toggle whether mouse events are reported to terminal applications.",
+            .title = "Мышь в программы",
+            .description = "Передавать ли события мыши программам в терминале.",
         }},
 
         .toggle_background_opacity => comptime &.{.{
             .action = .toggle_background_opacity,
-            .title = "Toggle Background Opacity",
-            .description = "Toggle the background opacity of a window that started transparent.",
+            .title = "Прозрачность фона",
+            .description = "Включить или выключить прозрачность окна, если она задана.",
         }},
 
-        .check_for_updates => comptime &.{.{
-            .action = .check_for_updates,
-            .title = "Check for Updates",
-            .description = "Check for updates to the application.",
-        }},
+        // VibeTerminal: обновления через Sparkle выключены, команда не нужна.
+        .check_for_updates => comptime &.{},
 
         .undo => comptime &.{.{
             .action = .undo,
-            .title = "Undo",
-            .description = "Undo the last action.",
+            .title = "Отменить",
+            .description = "Отменить последнее действие.",
         }},
 
         .redo => comptime &.{.{
             .action = .redo,
-            .title = "Redo",
-            .description = "Redo the last undone action.",
+            .title = "Повторить",
+            .description = "Повторить отменённое действие.",
         }},
 
         .quit => comptime &.{.{
             .action = .quit,
-            .title = "Quit",
-            .description = "Quit the application.",
+            .title = "Завершить",
+            .description = "Завершить приложение.",
         }},
 
         .text => comptime &.{.{
             .action = .{ .text = "👻" },
             .title = "Ghostty",
-            .description = "Put a little Ghostty in your terminal.",
+            .description = "Немного Ghostty в твоём терминале.",
         }},
 
         // No commands because they're parameterized and there

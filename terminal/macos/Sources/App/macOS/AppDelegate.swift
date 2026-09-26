@@ -277,7 +277,7 @@ class AppDelegate: NSObject,
 
         // Configure user notifications
         let actions = [
-            UNNotificationAction(identifier: Ghostty.userNotificationActionShow, title: "Show")
+            UNNotificationAction(identifier: Ghostty.userNotificationActionShow, title: "Показать")
         ]
 
         let center = UNUserNotificationCenter.current()
@@ -412,10 +412,10 @@ class AppDelegate: NSObject,
 
         // We have some visible window. Show an app-wide modal to confirm quitting.
         let alert = NSAlert()
-        alert.messageText = "Quit Ghostty?"
-        alert.informativeText = "All terminal sessions will be terminated."
-        alert.addButton(withTitle: "Close Ghostty")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = "Завершить VibeTerminal?"
+        alert.informativeText = "Все сессии остановятся, в том числе Claude."
+        alert.addButton(withTitle: "Завершить")
+        alert.addButton(withTitle: "Отменить")
         alert.alertStyle = .warning
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -505,9 +505,9 @@ class AppDelegate: NSObject,
             // may want to show this as a sheet on the focused window (especially if we're
             // opening a tab). I'm not sure.
             let alert = NSAlert()
-            alert.messageText = "Allow Ghostty to execute \"\(filename)\"?"
-            alert.addButton(withTitle: "Allow")
-            alert.addButton(withTitle: "Cancel")
+            alert.messageText = "Разрешить VibeTerminal запустить «\(filename)»?"
+            alert.addButton(withTitle: "Разрешить")
+            alert.addButton(withTitle: "Отменить")
             alert.alertStyle = .warning
             switch alert.runModal() {
             case .alertFirstButtonReturn:
@@ -941,7 +941,8 @@ class AppDelegate: NSObject,
     // MARK: - IB Actions
 
     @IBAction func openConfig(_ sender: Any?) {
-        Ghostty.App.openConfig()
+        // VibeTerminal: вместо текстового файла — окно настроек.
+        VibeSettingsController.show()
     }
 
     @IBAction func reloadConfig(_ sender: Any?) {
@@ -1091,8 +1092,8 @@ extension AppDelegate {
     }
 
     private func reloadDockMenu() {
-        let newWindow = NSMenuItem(title: "New Window", action: #selector(newWindow), keyEquivalent: "")
-        let newTab = NSMenuItem(title: "New Tab", action: #selector(newTab), keyEquivalent: "")
+        let newWindow = NSMenuItem(title: "Новое окно", action: #selector(newWindow), keyEquivalent: "")
+        let newTab = NSMenuItem(title: "Новая вкладка", action: #selector(newTab), keyEquivalent: "")
 
         dockMenu.removeAllItems()
         dockMenu.addItem(newWindow)
@@ -1343,11 +1344,11 @@ extension AppDelegate {
             guard let error else { return }
             Task { @MainActor in
                 let alert = NSAlert()
-                alert.messageText = "Failed to Set Default Terminal"
+                alert.messageText = "Не получилось сделать терминалом по умолчанию"
                 alert.informativeText = """
-                Ghostty could not be set as the default terminal application.
+                VibeTerminal не получилось сделать терминалом по умолчанию.
 
-                Error: \(error.localizedDescription)
+                Ошибка: \(error.localizedDescription)
                 """
                 alert.alertStyle = .warning
                 alert.runModal()
@@ -1372,17 +1373,17 @@ extension AppDelegate: NSMenuItemValidation {
 
         case #selector(undo(_:)):
             if undoManager.canUndo {
-                item.title = "Undo \(undoManager.undoActionName)"
+                item.title = "Отменить \(undoManager.undoActionName)"
             } else {
-                item.title = "Undo"
+                item.title = "Отменить"
             }
             return undoManager.canUndo
 
         case #selector(redo(_:)):
             if undoManager.canRedo {
-                item.title = "Redo \(undoManager.redoActionName)"
+                item.title = "Повторить \(undoManager.redoActionName)"
             } else {
-                item.title = "Redo"
+                item.title = "Повторить"
             }
             return undoManager.canRedo
 

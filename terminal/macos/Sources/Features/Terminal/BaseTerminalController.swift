@@ -337,8 +337,8 @@ class BaseTerminalController: NSWindowController,
         let alert = NSAlert()
         alert.messageText = messageText
         alert.informativeText = informativeText
-        alert.addButton(withTitle: "Close")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Закрыть")
+        alert.addButton(withTitle: "Отменить")
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window) { response in
             let alertWindow = alert.window
@@ -360,16 +360,16 @@ class BaseTerminalController: NSWindowController,
         guard let window else { return }
 
         let alert = NSAlert()
-        alert.messageText = "Change Tab Title"
-        alert.informativeText = "Leave blank to restore the default."
+        alert.messageText = "Название вкладки"
+        alert.informativeText = "Оставь пустым, чтобы вернуть обычное."
         alert.alertStyle = .informational
 
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 250, height: 24))
         textField.stringValue = titleOverride ?? window.title
         alert.accessoryView = textField
 
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "ОК")
+        alert.addButton(withTitle: "Отменить")
 
         alert.window.initialFirstResponder = textField
 
@@ -417,8 +417,8 @@ class BaseTerminalController: NSWindowController,
         // so SwiftUI does not update any of the bindings to note that window is no longer
         // being shown, and provides no callback to detect this.
         confirmClose(
-            messageText: "Close Terminal?",
-            informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
+            messageText: "Закрыть терминал?",
+            informativeText: "В терминале что-то работает. Если закрыть его, это остановится."
         ) { [weak self] in
             if let self {
                 self.removeSurfaceNode(node)
@@ -1197,8 +1197,8 @@ class BaseTerminalController: NSWindowController,
 
         // We require confirmation, so show an alert as long as we aren't already.
         confirmClose(
-            messageText: "Close Terminal?",
-            informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
+            messageText: "Закрыть терминал?",
+            informativeText: "В терминале что-то работает. Если закрыть его, это остановится."
         ) {
             window.close()
         }
