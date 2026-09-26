@@ -512,10 +512,12 @@ fn header(app: &App) -> Option<Header> {
     let area = app.areas.agent_frame;
     let folder = session.cwd.file_name().map_or_else(|| session.cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
     let folder = format!(" {folder} ");
-    let x = area.x + 1 + width(&folder);
-    let mut spans = vec![Span::styled(folder, bold())];
+    let mut spans = vec![Span::styled(folder.clone(), bold())];
     let mut branch = None;
     if let Some(git) = &session.git {
+        // Точка между папкой и веткой — как перед путём.
+        spans.push(Span::styled("· ", dim()));
+        let x = area.x + 1 + width(&folder) + width("· ");
         let label = format!("⎇ {}", git.head_label());
         let open = matches!(app.overlay, Overlay::Git(_));
         let style = if open || app.hover == Some(Target::Branch) { primary() } else { accent() };
@@ -551,7 +553,7 @@ fn ci_badge(app: &App) -> Option<(String, Style, Rect)> {
     let (label, style) = match state {
         CiState::Unsupported => return None,
         CiState::NeedCli(p) => (format!(" CI: нужен {} ", p.cli()), dim()),
-        CiState::NeedLogin(p) => (format!(" CI: войти в {} ", p.name()), accent()),
+        CiState::NeedLogin(p) => (format!(" Войти в {} ", p.name()), accent()),
         CiState::NoPipeline(_) => (" CI: не запускался ".to_string(), dim()),
         CiState::Error(..) => (" CI: ошибка ".to_string(), Style::new().fg(Color::Red)),
         CiState::Pipeline(_, pipeline) => {
