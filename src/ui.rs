@@ -167,6 +167,8 @@ const CARD_NO: &str = "✕ Нет";
 /// Нижняя строка, пока Claude в открытой сессии ждёт разрешения: что он
 /// просит и кнопки. Окно Claude не закрываем — там его родной диалог.
 pub struct PermitBar {
+    /// Какая сессия просит — чтобы было понятно, из какого чата запрос.
+    pub session: String,
     pub text: String,
     pub buttons: Vec<(Rect, &'static str, Decision)>,
 }
@@ -185,7 +187,7 @@ pub fn permit_bar(app: &App) -> Option<PermitBar> {
         buttons.push((Rect::new(x, bottom.y, w, 1), *label, *decision));
     }
     buttons.reverse();
-    Some(PermitBar { text: format!(" ! Claude просит: {what}: {detail}"), buttons })
+    Some(PermitBar { session: session.name.clone(), text: format!(" просит: {what}: {detail}"), buttons })
 }
 
 /// Кнопки «Да / Нет» в третьей строке карточки ждущей сессии.
@@ -469,7 +471,12 @@ fn draw_bottom(frame: &mut Frame, app: &App) {
         let text_width = bar.buttons.first().map_or(area.width, |(r, _, _)| r.x.saturating_sub(area.x + 1));
         let waiting = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
         let text = Rect::new(area.x, area.y, text_width, 1);
-        frame.render_widget(Paragraph::new(Span::styled(bar.text.as_str(), waiting)), text);
+        let line = Line::from(vec![
+            Span::styled(" ! ", waiting),
+            Span::styled(bar.session.as_str(), primary()),
+            Span::styled(bar.text.as_str(), waiting),
+        ]);
+        frame.render_widget(Paragraph::new(line), text);
         for (rect, label, decision) in &bar.buttons {
             let hover = hovered(app, Target::Permit(app.selected, *decision));
             let style = if hover || *decision == Decision::Allow { primary() } else { bold() };
