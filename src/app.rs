@@ -27,14 +27,16 @@ use signal_hook::iterator::Signals;
 use crate::menu::{self, Action};
 use crate::picker::Picker;
 use crate::session::{self, Session, SessionId};
-use crate::ui::{self, Areas, contains};
+use crate::caps::Caps;
+use crate::ui::{self, Areas, Target, contains};
 use crate::{keys, mouse};
 
-/// Кнопки и колесо мыши в формате SGR. Движение включаем, только если его
-/// просит Claude (см. `sync_outer_mouse`).
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+/// Кнопки, колесо и движение мыши в формате SGR. Движение нужно, чтобы
+/// подсвечивать то, что под мышью; Claude получает его, только если просил.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_OFF: &[u8] = b"\x1b[?1003l\x1b[?1002l\x1b[?1006l\x1b[?1000l";
-const MOUSE_BASE_MODE: u16 = 1000;
+/// Тонкая мигающая черта — привычный текстовый курсор, если Claude не попросил другой.
+const CURSOR_BAR: u16 = 5;
 const WHEEL_LINES: usize = 3;
 /// Не чаще 60 кадров в секунду.
 const FRAME: Duration = Duration::from_millis(16);
@@ -43,6 +45,7 @@ const SETTLE: Duration = Duration::from_millis(4);
 const FLASH_FOR: Duration = Duration::from_secs(5);
 
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+static POINTER_SHAPES: AtomicBool = AtomicBool::new(false);
 
 /// Кадр копится в буфере и уходит в терминал одним куском.
 type Screen = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
@@ -86,8 +89,13 @@ pub struct App {
     flash: Option<(String, Instant)>,
     next_id: SessionId,
     tx: Sender<Event>,
-    /// Какой режим мыши включён в терминале пользователя: 1000, 1002 или 1003.
-    outer_mouse: u16,
+    pub caps: Caps,
+    /// Что сейчас под мышью — подсвечиваем.
+    pub hover: Option<Target>,
+    /// Какая форма указателя мыши выставлена в терминале.
+    pointer: &'static str,
+    /// Какая форма текстового курсора выставлена в терминале.
+    cursor_shape: u16,
     /// Закрытые сессии, которые ещё гасятся в фоне.
     stopping: Vec<JoinHandle<()>>,
     quit: bool,
@@ -100,6 +108,8 @@ pub fn run() -> Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| cwd.clone());
     let (tx, rx) = mpsc::channel();
     spawn_signal_thread(tx.clone())?;
+    let caps = Caps::detect();
+    POINTER_SHAPES.store(caps.pointer_shape, Ordering::Relaxed);
 
     setup_terminal()?;
     install_panic_hook();
@@ -115,7 +125,10 @@ pub fn run() -> Result<()> {
         flash: None,
         next_id: 1,
         tx: tx.clone(),
-        outer_mouse: MOUSE_BASE_MODE,
+        caps,
+        hover: None,
+        pointer: "",
+        cursor_shape: 0,
         stopping: Vec::new(),
         quit: false,
         exit_note: None,
@@ -195,17 +208,20 @@ impl App {
                     Err(_) => break,
                 }
             }
-            if !self.quit {
-                self.sync_outer_mouse(terminal.backend_mut())?;
-            }
         }
         Ok(())
     }
 
-    fn draw(&self, terminal: &mut Screen) -> Result<()> {
+    fn draw(&mut self, terminal: &mut Screen) -> Result<()> {
         terminal.backend_mut().write_all(FRAME_START)?;
-        terminal.draw(|frame| ui::draw(frame, self))?;
+        let this = &*self;
+        terminal.draw(|frame| ui::draw(frame, this))?;
         let out = terminal.backend_mut();
+        let shape = self.current().cursor_style().unwrap_or(CURSOR_BAR);
+        if shape != self.cursor_shape {
+            write!(out, "\x1b[{shape} q")?;
+            self.cursor_shape = shape;
+        }
         out.write_all(FRAME_END)?;
         out.flush()?;
         Ok(())
@@ -248,7 +264,7 @@ impl App {
                 }
                 Ok(true)
             }
-            Event::Term(TermEvent::Mouse(mouse)) => self.on_mouse(mouse),
+            Event::Term(TermEvent::Mouse(mouse)) => self.on_mouse(mouse, terminal.backend_mut()),
             Event::Term(TermEvent::FocusGained | TermEvent::FocusLost) => {
                 let gained = matches!(event, Event::Term(TermEvent::FocusGained));
                 self.send_focus(self.selected, gained)?;
@@ -382,123 +398,122 @@ impl App {
         }
     }
 
-    fn on_mouse(&mut self, event: MouseEvent) -> Result<bool> {
+    fn on_mouse(&mut self, event: MouseEvent, out: &mut impl Write) -> Result<bool> {
         let (column, row) = (event.column, event.row);
-        let clicked = matches!(event.kind, MouseEventKind::Down(MouseButton::Left));
-        let wheel = match event.kind {
-            MouseEventKind::ScrollUp => -1,
-            MouseEventKind::ScrollDown => 1,
-            _ => 0,
+        let target = ui::target_at(self, column, row);
+        let mut dirty = target != self.hover;
+        self.hover = target;
+        let in_agent = matches!(self.overlay, Overlay::None) && contains(self.areas.agent, column, row);
+        let pointer = match (target, in_agent) {
+            (Some(_), _) => "pointer",
+            (None, true) => "text",
+            (None, false) => "default",
         };
-        let full = self.areas.full;
+        self.set_pointer(pointer, out)?;
 
-        match &mut self.overlay {
-            Overlay::None => {}
-            Overlay::Help => {
-                if clicked {
-                    self.overlay = Overlay::None;
+        match event.kind {
+            // Меню и список папок выделяют пункт под мышью.
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => match (&mut self.overlay, target) {
+                (Overlay::Menu(cursor), Some(Target::MenuItem(i))) if *cursor != i => {
+                    *cursor = i;
+                    dirty = true;
                 }
-                return Ok(clicked);
-            }
-            Overlay::Menu(cursor) => {
-                let items = menu::items(&self.sessions, self.selected, self.areas.sidebar.is_some());
-                if wheel != 0 {
-                    *cursor = (*cursor as isize + wheel).rem_euclid(items.len() as isize) as usize;
+                (Overlay::Picker(picker), Some(Target::PickerItem(i))) if picker.selected != i => {
+                    picker.selected = i;
+                    dirty = true;
+                }
+                _ => {}
+            },
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(target) = target {
+                    self.click(target)?;
+                    self.hover = None;
                     return Ok(true);
                 }
-                if !clicked {
-                    return Ok(false);
-                }
-                let hit = ui::menu_rows(full, &items).iter().position(|r| contains(*r, column, row));
-                match hit {
-                    Some(i) => self.perform(items[i].action)?,
-                    None if !ui::menu_contains(full, &items, column, row) => self.overlay = Overlay::None,
-                    None => return Ok(false),
-                }
-                return Ok(true);
-            }
-            Overlay::Picker(picker) => {
-                if wheel != 0 {
-                    picker.move_by(wheel);
-                    return Ok(true);
-                }
-                if !clicked {
-                    return Ok(false);
-                }
-                let list = ui::picker_list(full);
-                if contains(list, column, row) {
-                    let index = ui::picker_offset(list, picker.selected) + (row - list.y) as usize;
-                    if index < picker.len() {
-                        picker.selected = index;
-                        self.open_picked();
+                // Клик мимо меню, списка папок или помощи закрывает их.
+                let full = self.areas.full;
+                let outside = match &self.overlay {
+                    Overlay::Help => true,
+                    Overlay::Menu(_) => {
+                        let items = menu::items(&self.sessions, self.selected, self.areas.sidebar.is_some());
+                        !ui::menu_contains(full, &items, column, row)
                     }
-                } else if !ui::picker_contains(full, column, row) {
+                    Overlay::Picker(_) => !ui::picker_contains(full, column, row),
+                    _ => false,
+                };
+                if outside {
                     self.overlay = Overlay::None;
-                }
-                return Ok(true);
-            }
-            Overlay::Rename(_) | Overlay::Confirm(_) => {
-                if !clicked {
-                    return Ok(false);
-                }
-                let [yes, no] = ui::dialog_buttons(full, ui::dialog_labels(&self.overlay));
-                if contains(yes, column, row) {
-                    self.confirm_yes();
-                } else if contains(no, column, row) {
-                    self.overlay = Overlay::None;
-                }
-                return Ok(true);
-            }
-        }
-
-        if clicked {
-            if contains(ui::menu_button(self.areas.top), column, row) {
-                self.overlay = Overlay::Menu(self.selected);
-                return Ok(true);
-            }
-            if let Some(ui::Button { action, .. }) =
-                ui::bottom_buttons(&self.areas).into_iter().find(|b| contains(b.rect, column, row))
-            {
-                self.perform(action)?;
-                return Ok(true);
-            }
-            if let Some(sidebar) = self.areas.sidebar {
-                let (cards, new_button) = ui::sidebar_parts(sidebar);
-                if contains(new_button, column, row) {
-                    self.perform(Action::New)?;
-                    return Ok(true);
-                }
-                let offset = ui::cards_offset(cards, self.selected);
-                if let Some(index) = ui::card_at(cards, offset, column, row).filter(|&i| i < self.sessions.len()) {
-                    self.select(index)?;
                     return Ok(true);
                 }
             }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let delta = if matches!(event.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                match &mut self.overlay {
+                    Overlay::Menu(cursor) => {
+                        let len = menu::items(&self.sessions, self.selected, self.areas.sidebar.is_some()).len();
+                        *cursor = (*cursor as isize + delta).rem_euclid(len as isize) as usize;
+                        return Ok(true);
+                    }
+                    Overlay::Picker(picker) => {
+                        picker.move_by(delta);
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
 
+        if !in_agent {
+            return Ok(dirty);
+        }
         let area = self.areas.agent;
-        if contains(area, column, row) {
-            let screen = self.current().screen();
-            let encoded = mouse::encode(
-                &event,
-                column - area.x,
-                row - area.y,
-                screen.mouse_protocol_mode(),
-                screen.mouse_protocol_encoding(),
-            );
-            if let Some(bytes) = encoded {
-                self.current_mut().write(&bytes)?;
-                return Ok(false);
-            }
-            // Claude мышь не слушает — колесо листает нашу историю.
-            match wheel {
-                -1 => self.current_mut().scroll_up(WHEEL_LINES),
-                1 => self.current_mut().scroll_down(WHEEL_LINES),
-                _ => return Ok(false),
-            }
-            return Ok(true);
+        let screen = self.current().screen();
+        let encoded =
+            mouse::encode(&event, column - area.x, row - area.y, screen.mouse_protocol_mode(), screen.mouse_protocol_encoding());
+        if let Some(bytes) = encoded {
+            self.current_mut().write(&bytes)?;
+            return Ok(dirty);
         }
-        Ok(false)
+        // Claude мышь не слушает — колесо листает нашу историю.
+        match event.kind {
+            MouseEventKind::ScrollUp => self.current_mut().scroll_up(WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.current_mut().scroll_down(WHEEL_LINES),
+            _ => return Ok(dirty),
+        }
+        Ok(true)
+    }
+
+    fn click(&mut self, target: Target) -> Result<()> {
+        match target {
+            Target::MenuButton => self.overlay = Overlay::Menu(self.selected),
+            Target::NewSession => self.perform(Action::New)?,
+            Target::Card(index) => self.select(index)?,
+            Target::Bottom(action) => self.perform(action)?,
+            Target::MenuItem(index) => {
+                let items = menu::items(&self.sessions, self.selected, self.areas.sidebar.is_some());
+                self.perform(items[index].action)?;
+            }
+            Target::PickerItem(index) => {
+                if let Overlay::Picker(picker) = &mut self.overlay {
+                    picker.selected = index;
+                }
+                self.open_picked();
+            }
+            Target::DialogYes => self.confirm_yes(),
+            Target::DialogNo => self.overlay = Overlay::None,
+        }
+        Ok(())
+    }
+
+    /// «Рука» над кнопками — там, где терминал умеет менять указатель.
+    fn set_pointer(&mut self, shape: &'static str, out: &mut impl Write) -> Result<()> {
+        if self.caps.pointer_shape && shape != self.pointer {
+            write!(out, "\x1b]22;{shape}\x1b\\")?;
+            out.flush()?;
+            self.pointer = shape;
+        }
+        Ok(())
     }
 
     fn open(&mut self, dir: &Path) -> Result<()> {
@@ -508,7 +523,8 @@ impl App {
         self.next_id += 1;
         let tx = self.tx.clone();
         let area = self.areas.agent;
-        let session = Session::spawn(id, name, dir, area.height.max(1), area.width.max(1), move |chunk| {
+        let (rows, cols, truecolor) = (area.height.max(1), area.width.max(1), self.caps.truecolor);
+        let session = Session::spawn(id, name, dir, rows, cols, truecolor, move |chunk| {
             let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
         })?;
         self.sessions.push(session);
@@ -592,26 +608,6 @@ impl App {
         (2..).map(|n| format!("{base}-{n}")).find(|name| !taken(name)).unwrap()
     }
 
-    /// Если Claude хочет получать движение мыши, включаем его и у нас.
-    fn sync_outer_mouse(&mut self, out: &mut impl Write) -> Result<()> {
-        let wanted = match self.current().screen().mouse_protocol_mode() {
-            vt100::MouseProtocolMode::ButtonMotion => 1002,
-            vt100::MouseProtocolMode::AnyMotion => 1003,
-            _ => MOUSE_BASE_MODE,
-        };
-        if wanted != self.outer_mouse {
-            if self.outer_mouse != MOUSE_BASE_MODE {
-                write!(out, "\x1b[?{}l", self.outer_mouse)?;
-            }
-            if wanted != MOUSE_BASE_MODE {
-                write!(out, "\x1b[?{wanted}h")?;
-            }
-            out.flush()?;
-            self.outer_mouse = wanted;
-        }
-        Ok(())
-    }
-
     fn stop_everything(&mut self) {
         session::stop_all(&mut self.sessions);
         for handle in self.stopping.drain(..) {
@@ -672,6 +668,11 @@ fn restore_terminal() {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
     let _ = out.write_all(MOUSE_OFF);
+    // Курсор и указатель — как были до vv.
+    let _ = out.write_all(b"\x1b[0 q");
+    if POINTER_SHAPES.load(Ordering::Relaxed) {
+        let _ = out.write_all(b"\x1b]22;default\x1b\\");
+    }
     let _ = execute!(out, DisableFocusChange, DisableBracketedPaste, LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
 }

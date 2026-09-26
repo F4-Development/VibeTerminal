@@ -91,6 +91,58 @@ fn centered(full: Rect, width: u16, height: u16) -> Rect {
 
 // ── Геометрия кликабельного ───────────────────────────────────────────────
 
+/// Всё, на что можно нажать мышью.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    MenuButton,
+    NewSession,
+    Card(usize),
+    Bottom(Action),
+    MenuItem(usize),
+    PickerItem(usize),
+    DialogYes,
+    DialogNo,
+}
+
+/// Что под мышью. Пока открыто окно, кликается только оно.
+pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
+    let full = app.areas.full;
+    match &app.overlay {
+        Overlay::Help => None,
+        Overlay::Menu(_) => {
+            let items = menu::items(&app.sessions, app.selected, app.areas.sidebar.is_some());
+            menu_rows(full, &items).iter().position(|r| contains(*r, column, row)).map(Target::MenuItem)
+        }
+        Overlay::Picker(picker) => {
+            let list = picker_list(full);
+            let index = picker_offset(list, picker.selected) + row.checked_sub(list.y)? as usize;
+            (contains(list, column, row) && index < picker.len()).then_some(Target::PickerItem(index))
+        }
+        Overlay::Rename(_) | Overlay::Confirm(_) => {
+            let [yes, no] = dialog_buttons(full, dialog_labels(&app.overlay));
+            if contains(yes, column, row) {
+                Some(Target::DialogYes)
+            } else {
+                contains(no, column, row).then_some(Target::DialogNo)
+            }
+        }
+        Overlay::None => {
+            if contains(menu_button(app.areas.top), column, row) {
+                return Some(Target::MenuButton);
+            }
+            if let Some(button) = bottom_buttons(&app.areas).into_iter().find(|b| contains(b.rect, column, row)) {
+                return Some(Target::Bottom(button.action));
+            }
+            let (cards, new_button) = sidebar_parts(app.areas.sidebar?);
+            if contains(new_button, column, row) {
+                return Some(Target::NewSession);
+            }
+            let index = card_at(cards, cards_offset(cards, app.selected), column, row)?;
+            (index < app.sessions.len()).then_some(Target::Card(index))
+        }
+    }
+}
+
 pub fn menu_button(top: Rect) -> Rect {
     let w = width(MENU_BUTTON).min(top.width);
     Rect::new(top.right() - w, top.y, w, 1)
@@ -166,9 +218,9 @@ fn dialog_rect(full: Rect) -> Rect {
 /// Подписи кнопок диалога: первая — «да», вторая — «отмена».
 pub fn dialog_labels(overlay: &Overlay) -> [&'static str; 2] {
     match overlay {
-        Overlay::Rename(_) => [" Сохранить ", "Отмена"],
-        Overlay::Confirm(Confirm::Quit) => [" Да, выйти ", "Отмена"],
-        _ => [" Да, закрыть ", "Отмена"],
+        Overlay::Rename(_) => [" Сохранить ", " Отмена "],
+        Overlay::Confirm(Confirm::Quit) => [" Да, выйти ", " Отмена "],
+        _ => [" Да, закрыть ", " Отмена "],
     }
 }
 
@@ -206,6 +258,10 @@ fn dim() -> Style {
 
 fn primary() -> Style {
     Style::new().fg(Color::Indexed(16)).bg(ACCENT).add_modifier(Modifier::BOLD)
+}
+
+fn hovered(app: &App, target: Target) -> bool {
+    app.hover == Some(target)
 }
 
 fn accent() -> Style {
@@ -253,7 +309,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::Picker(picker) => draw_picker(frame, full, picker),
         Overlay::Rename(input) => {
             let lines = vec![Line::raw("Новое имя сессии:"), Line::raw("")];
-            let text = draw_dialog(frame, full, " Переименовать ", lines, dialog_labels(&app.overlay));
+            let text = draw_dialog(frame, app, " Переименовать ", lines);
             let field = Rect::new(text.x, text.y + 1, text.width, 1);
             frame.render_widget(
                 Paragraph::new(Span::styled(format!("{input} "), Style::new().add_modifier(Modifier::UNDERLINED))),
@@ -273,7 +329,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                     },
                 ),
             };
-            draw_dialog(frame, full, title, vec![Line::raw(text)], dialog_labels(&app.overlay));
+            draw_dialog(frame, app, title, vec![Line::raw(text)]);
         }
         Overlay::Help => draw_help(frame, full),
     }
@@ -284,7 +340,7 @@ fn draw_top(frame: &mut Frame, app: &App) {
     let logo = Span::styled(" ✻ Vibe Vim ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
     frame.render_widget(Paragraph::new(logo), area);
     let open = matches!(app.overlay, Overlay::Menu(_));
-    let button = if open {
+    let button = if open || hovered(app, Target::MenuButton) {
         Line::from(Span::styled(MENU_BUTTON, primary()))
     } else {
         Line::from(vec![Span::styled("☰", accent()), Span::raw(" Меню  "), Span::styled("Ctrl-\\ ", dim())])
@@ -301,7 +357,12 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         if y + 1 >= cards.bottom() {
             break;
         }
-        let name = if i == app.selected {
+        let name = if i != app.selected && hovered(app, Target::Card(i)) {
+            Line::from(vec![
+                Span::styled("› ", Style::new().fg(ACCENT)),
+                Span::styled(session.name.as_str(), Style::new().fg(ACCENT)),
+            ])
+        } else if i == app.selected {
             Line::from(vec![
                 Span::styled("❯ ", Style::new().fg(ACCENT)),
                 Span::styled(session.name.as_str(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
@@ -312,7 +373,8 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         let detail = Line::from(Span::styled(format!("  {}", session_detail(session, &app.home)), dim()));
         frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
     }
-    frame.render_widget(Paragraph::new(Span::styled(NEW_BUTTON, accent())), button);
+    let style = if hovered(app, Target::NewSession) { primary() } else { accent() };
+    frame.render_widget(Paragraph::new(Span::styled(NEW_BUTTON, style)), button);
 }
 
 fn draw_agent(frame: &mut Frame, app: &App) {
@@ -328,14 +390,18 @@ fn draw_agent(frame: &mut Frame, app: &App) {
         block = block.title(Line::from(Span::styled(format!(" {detail} "), dim())).right_aligned());
     }
     frame.render_widget(block, app.areas.agent_frame);
-    view::render(session.screen(), app.areas.agent, frame.buffer_mut());
+    view::render(session.screen(), app.areas.agent, frame.buffer_mut(), app.caps.truecolor);
 }
 
 fn draw_bottom(frame: &mut Frame, app: &App) {
     let area = app.areas.bottom;
     let buttons = bottom_buttons(&app.areas);
     for button in &buttons {
-        let line = Line::from(vec![Span::styled(button.icon, accent()), Span::raw(format!(" {}", button.label))]);
+        let line = if hovered(app, Target::Bottom(button.action)) {
+            Line::from(Span::styled(format!("{} {}", button.icon, button.label), primary()))
+        } else {
+            Line::from(vec![Span::styled(button.icon, accent()), Span::raw(format!(" {}", button.label))])
+        };
         frame.render_widget(Paragraph::new(line), button.rect);
     }
 
@@ -382,7 +448,9 @@ fn draw_menu(frame: &mut Frame, app: &App, cursor: usize) {
 }
 
 /// Рисует диалог и возвращает область для текста (под поле ввода).
-fn draw_dialog(frame: &mut Frame, full: Rect, title: &str, lines: Vec<Line>, labels: [&str; 2]) -> Rect {
+fn draw_dialog(frame: &mut Frame, app: &App, title: &str, lines: Vec<Line>) -> Rect {
+    let full = app.areas.full;
+    let labels = dialog_labels(&app.overlay);
     let area = dialog_rect(full);
     frame.render_widget(Clear, area);
     let block = frame_block(title, true);
@@ -392,7 +460,8 @@ fn draw_dialog(frame: &mut Frame, full: Rect, title: &str, lines: Vec<Line>, lab
     frame.render_widget(Paragraph::new(lines), text);
     let [yes, no] = dialog_buttons(full, labels);
     frame.render_widget(Paragraph::new(Span::styled(labels[0], primary())), yes);
-    frame.render_widget(Paragraph::new(Span::styled(labels[1], Style::new().add_modifier(Modifier::BOLD))), no);
+    let no_style = if hovered(app, Target::DialogNo) { primary() } else { Style::new().add_modifier(Modifier::BOLD) };
+    frame.render_widget(Paragraph::new(Span::styled(labels[1], no_style)), no);
     text
 }
 

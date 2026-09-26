@@ -1,4 +1,5 @@
 mod app;
+mod caps;
 mod keys;
 mod menu;
 mod mouse;

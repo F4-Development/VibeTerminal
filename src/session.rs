@@ -60,6 +60,7 @@ impl Session {
         cwd: &Path,
         rows: u16,
         cols: u16,
+        truecolor: bool,
         on_output: impl Fn(Option<Vec<u8>>) + Send + 'static,
     ) -> Result<Self> {
         let pty = native_pty_system().openpty(pty_size(rows, cols))?;
@@ -75,7 +76,13 @@ impl Session {
         };
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        // Говорим Claude правду о цветах: без 24-битного цвета он сам выберет
+        // палитру из 256, которую понимает терминал.
+        if truecolor {
+            cmd.env("COLORTERM", "truecolor");
+        } else {
+            cmd.env_remove("COLORTERM");
+        }
         cmd.env("TERM_PROGRAM", "vibevim");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         for var in PARENT_CLAUDE_VARS {
@@ -147,6 +154,11 @@ impl Session {
     pub fn frame_hold(&self) -> Option<Duration> {
         let left = SYNC_UPDATE_MAX.checked_sub(self.sync_since?.elapsed())?;
         (!left.is_zero()).then_some(left)
+    }
+
+    /// Форма курсора, которую попросил Claude (DECSCUSR), если просил.
+    pub fn cursor_style(&self) -> Option<u16> {
+        self.parser.callbacks().cursor_style
     }
 
     pub fn wants_focus_events(&self) -> bool {
@@ -276,6 +288,7 @@ struct Term {
     bell: bool,
     focus_events: bool,
     sync_update: bool,
+    cursor_style: Option<u16>,
 }
 
 impl vt100::Callbacks for Term {
@@ -307,6 +320,7 @@ impl vt100::Callbacks for Term {
             // Кто ты: VT220 с цветами. Без ответа программы ждут таймаут.
             (None, 'c', _) => self.replies.extend_from_slice(b"\x1b[?62;22c"),
             (Some(b'>'), 'c', _) => self.replies.extend_from_slice(b"\x1b[>1;10;0c"),
+            (Some(b' '), 'q', style) => self.cursor_style = style.filter(|&s| s != 0),
             // Режимы, которых vt100 не знает: фокус окна и кадры целиком.
             (Some(b'?'), 'h' | 'l', _) => {
                 for param in params {
@@ -351,6 +365,15 @@ mod tests {
         assert!(p.callbacks().focus_events && p.callbacks().sync_update);
         p.process(b"\x1b[?2026l");
         assert!(p.callbacks().focus_events && !p.callbacks().sync_update);
+    }
+
+    #[test]
+    fn remembers_cursor_style() {
+        let mut p = parser();
+        p.process(b"\x1b[2 q");
+        assert_eq!(p.callbacks().cursor_style, Some(2));
+        p.process(b"\x1b[0 q");
+        assert_eq!(p.callbacks().cursor_style, None);
     }
 
     #[test]

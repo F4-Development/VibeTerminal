@@ -49,6 +49,10 @@ fn key_bytes(name: &str) -> Vec<u8> {
         "wheelup" => b"\x1b[<64;60;10M".to_vec(),
         "wheeldown" => b"\x1b[<65;60;10M".to_vec(),
         "pgup" => b"\x1b[5~".to_vec(),
+        other if other.starts_with("move:") => {
+            let (col, row) = other[5..].split_once(',').unwrap();
+            format!("\x1b[<35;{col};{row}M").into_bytes()
+        }
         other if other.starts_with("click:") => {
             let (col, row) = other[6..].split_once(',').unwrap();
             format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m").into_bytes()
@@ -131,6 +135,19 @@ fn main() {
                 for line in p.screen().contents().lines() {
                     println!("│{}", line.trim_end());
                 }
+            }
+            "cell" => {
+                let (col, row) = arg.split_once(',').unwrap();
+                let (col, row): (u16, u16) = (col.parse().unwrap(), row.parse().unwrap());
+                let p = parser.lock().unwrap();
+                let cell = p.screen().cell(row, col).unwrap();
+                println!(
+                    "клетка {col},{row} «{}»: цвет {:?}, фон {:?}, жирный {}",
+                    cell.contents(),
+                    cell.fgcolor(),
+                    cell.bgcolor(),
+                    cell.bold()
+                );
             }
             "hangup" => {
                 let inside = descendants(vv_pid);
