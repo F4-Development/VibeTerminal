@@ -4499,6 +4499,22 @@ pub fn finalize(self: *Config) !void {
     // specific variable use sites for more details.
     const probable_cli = probableCliEnvironment();
 
+    // VibeTerminal: если команда не задана, запускаем vv, который лежит в
+    // приложении рядом с основным бинарником (Contents/MacOS/vv). Запуск
+    // из терминала (`probable_cli`) не трогаем — там ждут обычную оболочку.
+    if (comptime builtin.target.os.tag == .macos) {
+        if (self.command == null and !probable_cli) vibe: {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const dir = std.fs.selfExeDirPath(&buf) catch break :vibe;
+            const vv = try std.fs.path.joinZ(alloc, &.{ dir, "vv" });
+            std.fs.accessAbsolute(vv, .{}) catch break :vibe;
+            const argv = try alloc.alloc([:0]const u8, 1);
+            argv[0] = vv;
+            self.command = .{ .direct = argv };
+            log.info("command src=vibeterminal value={s}", .{vv});
+        }
+    }
+
     // If we have a font-family set and don't set the others, default
     // the others to the font family. This way, if someone does
     // --font-family=foo, then we try to get the stylized versions of

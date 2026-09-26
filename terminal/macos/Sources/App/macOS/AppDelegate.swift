@@ -218,8 +218,8 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
-        // Start our update checker.
-        updateController.startUpdater()
+        // VibeTerminal не обновляется через Sparkle: лента обновлений —
+        // это сборки Ghostty, они заменили бы наше приложение.
 
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
