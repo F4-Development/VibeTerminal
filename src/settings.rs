@@ -39,6 +39,8 @@ pub struct Settings {
     /// Системный звук из /System/Library/Sounds (`Glass`, `Ping`…).
     /// Пусто — без звука.
     pub notify_sound: String,
+    /// Какие лимиты Claude показывать внизу: `session`, `week`, `week:Fable`…
+    pub usage_shown: Vec<String>,
 }
 
 impl Default for Settings {
@@ -54,6 +56,7 @@ impl Default for Settings {
             notify_failed: true,
             notify_banner: true,
             notify_sound: "Glass".into(),
+            usage_shown: vec!["context".into(), "session".into()],
         }
     }
 }
@@ -69,6 +72,17 @@ impl Settings {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
+    }
+
+    /// Записать. vv сам меняет только то, что выбирают в его окнах, —
+    /// например, какие лимиты показывать.
+    pub fn save(&self, home: &Path) -> std::io::Result<()> {
+        let path = Self::path(home);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, json + "\n")
     }
 
     /// Открыть настройки. В VibeTerminal — его окно настроек (через

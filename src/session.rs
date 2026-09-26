@@ -12,7 +12,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::ci::CiState;
 use crate::git::RepoStatus;
-use crate::hooks::{self, Decision, HookEvent, PermissionRequest};
+use crate::hooks::{self, Decision, HookEvent, PermissionRequest, StatusLine};
 use crate::status::{State, Status};
 
 const SCROLLBACK_LINES: usize = 10_000;
@@ -28,7 +28,7 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// Метки чужой сессии Claude, если vv запущен изнутри Claude Code. С ними
 /// наш Claude считает себя дочерним и, например, не сохраняет историю.
 /// `CLAUDE_CODE_SSE_PORT` не трогаем — это связь с IDE.
-const PARENT_CLAUDE_VARS: &[&str] = &[
+pub(crate) const PARENT_CLAUDE_VARS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
@@ -85,6 +85,8 @@ pub struct Session {
     pub is_command: bool,
     /// Работает, готово, прервали — по событиям Claude.
     pub status: Status,
+    /// Заполнение контекста и лимиты из строки состояния Claude.
+    pub status_line: Option<StatusLine>,
     parser: vt100::Parser<Term>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -196,6 +198,7 @@ impl Session {
             ci_expect: None,
             is_command: matches!(program, Program::Command(_)),
             status: Status::default(),
+            status_line: None,
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
             master: pty.master,
             writer,

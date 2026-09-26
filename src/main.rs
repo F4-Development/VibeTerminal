@@ -13,6 +13,7 @@ mod session;
 mod settings;
 mod status;
 mod ui;
+mod usage;
 mod userenv;
 mod view;
 

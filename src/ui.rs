@@ -16,6 +16,7 @@ use crate::menu::{self, Action, MenuItem};
 use crate::picker::{Picker, display_path};
 use crate::session::Session;
 use crate::status::{self, State};
+use crate::usage;
 use crate::view;
 
 /// Цвет Claude — работает и в тёмной, и в светлой теме терминала.
@@ -115,6 +116,11 @@ pub enum Target {
     Git(GitTarget),
     /// «Ждут тебя» внизу.
     NextWaiting,
+    /// Лимиты и контекст внизу справа — открывает окно лимитов.
+    Usage,
+    /// Строка в окне лимитов: галочка «показывать внизу».
+    UsageRow(usize),
+    UsageRefresh,
 }
 
 /// Что под мышью. Пока открыто окно, кликается только оно.
@@ -123,6 +129,12 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
     match &app.overlay {
         Overlay::Help => None,
         Overlay::Git(git) => gitui::target_at(git, full, column, row).map(Target::Git),
+        Overlay::Usage(_) => {
+            if contains(usage_refresh_rect(app), column, row) {
+                return Some(Target::UsageRefresh);
+            }
+            usage_row_rects(app).iter().position(|r| contains(*r, column, row)).map(Target::UsageRow)
+        }
         Overlay::Menu(_) => {
             let items = menu::items(&app.sessions, app.selected, app.areas.sidebar.is_some());
             menu_rows(full, &items).iter().position(|r| contains(*r, column, row)).map(Target::MenuItem)
@@ -146,6 +158,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             }
             if ci_badge(app).is_some_and(|(_, _, r)| contains(r, column, row)) {
                 return Some(Target::Ci);
+            }
+            if usage_badge(app).is_some_and(|(_, r)| contains(r, column, row)) {
+                return Some(Target::Usage);
             }
             if permit_bar(app).is_none() && waiting_button(app).is_some_and(|(r, _)| contains(r, column, row)) {
                 return Some(Target::NextWaiting);
@@ -402,6 +417,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_sidebar(frame, sidebar, app);
     }
     draw_agent(frame, app);
+    if let Some((line, rect)) = usage_badge(app) {
+        let line = if hovered(app, Target::Usage) { line.style(primary()) } else { line };
+        frame.render_widget(Paragraph::new(line), rect);
+    }
     draw_bottom(frame, app);
 
     let full = app.areas.full;
@@ -444,6 +463,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Overlay::Help => draw_help(frame, full),
         Overlay::Git(git) => gitui::draw(frame, git, full),
+        Overlay::Usage(cursor) => draw_usage(frame, app, *cursor),
     }
 }
 
@@ -675,6 +695,174 @@ fn ci_badge(app: &App) -> Option<(String, Style, Rect)> {
     let w = width(&label);
     let rect = Rect::new(area.right().saturating_sub(w + 2), area.y, w, 1);
     Some((label, style, rect))
+}
+
+// ── Лимиты Claude и контекст чата ────────────────────────────────────────
+
+const USAGE_WIDTH: u16 = 64;
+/// Строк на лимит: название, полоска, сброс, пустая.
+const USAGE_BLOCK: u16 = 4;
+const USAGE_REFRESH: &str = "↻ Обновить";
+
+/// Строка окна лимитов: контекст открытого чата или лимит подписки.
+pub struct UsageRow {
+    pub key: String,
+    pub label: String,
+    pub short: String,
+    pub percent: Option<u8>,
+    pub detail: String,
+}
+
+pub fn usage_rows(app: &App) -> Vec<UsageRow> {
+    let session = app.current();
+    let line = session.and_then(|s| s.status_line);
+    let context = line.and_then(|l| l.context);
+    let detail = match (session, context, line.and_then(|l| l.context_size)) {
+        (None, ..) => "нет открытой сессии".to_string(),
+        (Some(s), ..) if s.is_command => "в этой сессии не Claude".to_string(),
+        (Some(_), Some(percent), Some(size)) => {
+            format!("{} из {} токенов", tokens(percent / 100.0 * size as f64), tokens(size as f64))
+        }
+        _ => "появится после первого ответа Claude".to_string(),
+    };
+    let mut rows = vec![UsageRow {
+        key: "context".into(),
+        label: "Контекст этого чата".into(),
+        short: "контекст".into(),
+        percent: context.map(|p| p.round().clamp(0.0, 100.0) as u8),
+        detail,
+    }];
+    rows.extend(app.usage.iter().map(|limit| UsageRow {
+        key: limit.key.clone(),
+        label: limit.label.clone(),
+        short: limit.short.clone(),
+        percent: Some(limit.percent),
+        detail: limit.resets_at.map(usage::reset_text).unwrap_or_default(),
+    }));
+    rows
+}
+
+/// 90 000 → «90k», 1 000 000 → «1M».
+fn tokens(count: f64) -> String {
+    if count >= 1_000_000.0 {
+        let millions = count / 1_000_000.0;
+        if millions.fract() < 0.05 { format!("{millions:.0}M") } else { format!("{millions:.1}M") }
+    } else {
+        format!("{:.0}k", count / 1000.0)
+    }
+}
+
+fn percent_style(percent: u8) -> Style {
+    match percent {
+        0..50 => Style::new().fg(Color::Green),
+        50..80 => Style::new().fg(Color::Yellow),
+        _ => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// Внизу справа на рамке окна Claude: «контекст 42% · 5 ч 38%». Ничего не
+/// выбрано или ещё не узнали — просто «Лимиты», чтобы было куда нажать.
+pub fn usage_badge(app: &App) -> Option<(Line<'static>, Rect)> {
+    let mut spans = vec![Span::raw(" ")];
+    for row in usage_rows(app).into_iter().filter(|row| app.usage_shown.contains(&row.key)) {
+        let Some(percent) = row.percent else { continue };
+        if spans.len() > 1 {
+            spans.push(Span::styled(" · ", dim()));
+        }
+        spans.push(Span::styled(format!("{} ", row.short), dim()));
+        spans.push(Span::styled(format!("{percent}%"), percent_style(percent)));
+    }
+    if spans.len() == 1 {
+        spans.push(Span::styled("Лимиты", dim()));
+    }
+    spans.push(Span::raw(" "));
+    let line = Line::from(spans);
+    let area = app.areas.agent_frame;
+    let w = line.width() as u16;
+    if area.height < 3 || w + 4 > area.width {
+        return None;
+    }
+    Some((line, Rect::new(area.right() - w - 2, area.bottom() - 1, w, 1)))
+}
+
+fn usage_rect(app: &App) -> Rect {
+    let rows = usage_rows(app).len() as u16;
+    centered(app.areas.full, USAGE_WIDTH, 2 + 1 + rows * USAGE_BLOCK + 1)
+}
+
+/// Где каждая строка окна лимитов (название, полоска, сброс) — для кликов.
+pub fn usage_row_rects(app: &App) -> Vec<Rect> {
+    let inner = frame_block("", true).inner(usage_rect(app));
+    (0..usage_rows(app).len() as u16)
+        .map(|i| Rect::new(inner.x, inner.y + 1 + i * USAGE_BLOCK, inner.width, USAGE_BLOCK - 1))
+        .filter(|r| r.bottom() <= inner.bottom())
+        .collect()
+}
+
+fn usage_footer(app: &App) -> Rect {
+    let inner = frame_block("", true).inner(usage_rect(app));
+    Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1)
+}
+
+fn usage_refresh_rect(app: &App) -> Rect {
+    let footer = usage_footer(app);
+    let w = width(USAGE_REFRESH);
+    Rect::new(footer.right().saturating_sub(w + 2), footer.y, w, 1)
+}
+
+pub fn usage_contains(app: &App, column: u16, row: u16) -> bool {
+    contains(usage_rect(app), column, row)
+}
+
+fn draw_usage(frame: &mut Frame, app: &App, cursor: usize) {
+    let area = usage_rect(app);
+    frame.render_widget(Clear, area);
+    let hint = " ↑↓ · Пробел — показывать внизу · R — обновить · Esc ";
+    let block = frame_block(" Лимиты Claude ", true).title_bottom(Line::from(hint).centered());
+    frame.render_widget(block, area);
+    let rows = usage_rows(app);
+    for (i, (rect, row)) in usage_row_rects(app).into_iter().zip(&rows).enumerate() {
+        let shown = app.usage_shown.contains(&row.key);
+        let label_style = if i == cursor { primary() } else { bold() };
+        let title = Line::from(vec![
+            Span::styled(if shown { " [✓] " } else { " [ ] " }, if shown { accent() } else { dim() }),
+            Span::styled(format!(" {} ", row.label), label_style),
+        ]);
+        frame.render_widget(Paragraph::new(title), Rect::new(rect.x, rect.y, rect.width, 1));
+        if let Some(percent) = row.percent {
+            let text = Span::styled(format!("{percent}% "), percent_style(percent).add_modifier(Modifier::BOLD));
+            frame.render_widget(Paragraph::new(text).alignment(Alignment::Right), Rect::new(rect.x, rect.y, rect.width, 1));
+            let bar_width = rect.width.saturating_sub(8) as usize;
+            let filled = (bar_width * percent as usize).div_ceil(100).min(bar_width);
+            let bar = Line::from(vec![
+                Span::raw("      "),
+                Span::styled("█".repeat(filled), percent_style(percent)),
+                Span::styled("░".repeat(bar_width - filled), dim()),
+            ]);
+            frame.render_widget(Paragraph::new(bar), Rect::new(rect.x, rect.y + 1, rect.width, 1));
+        }
+        let detail = Line::from(Span::styled(format!("      {}", row.detail), dim()));
+        frame.render_widget(Paragraph::new(detail), Rect::new(rect.x, rect.y + 2, rect.width, 1));
+    }
+    let status = match (&app.usage_error, app.usage_loading, app.usage_at) {
+        (_, true, _) => Span::styled("  Узнаю у Claude…", dim()),
+        (Some(error), ..) => Span::styled(format!("  Не обновилось: {error}"), Style::new().fg(Color::Red)),
+        (None, _, Some(at)) => Span::styled(format!("  Обновлено {}", ago(at)), dim()),
+        _ => Span::raw(""),
+    };
+    let footer = usage_footer(app);
+    let refresh = usage_refresh_rect(app);
+    frame.render_widget(Paragraph::new(status), Rect::new(footer.x, footer.y, refresh.x.saturating_sub(footer.x + 1), 1));
+    let style = if hovered(app, Target::UsageRefresh) { primary() } else { accent() };
+    frame.render_widget(Paragraph::new(Span::styled(USAGE_REFRESH, style)), refresh);
+}
+
+/// «только что», «3 мин назад».
+fn ago(at: std::time::Instant) -> String {
+    match at.elapsed().as_secs() / 60 {
+        0 => "только что".into(),
+        minutes => format!("{minutes} мин назад"),
+    }
 }
 
 /// Где в шапке ветка — под ней открывается меню git.

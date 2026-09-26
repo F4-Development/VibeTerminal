@@ -29,12 +29,13 @@ use crate::picker::Picker;
 use crate::session::{self, Launch, Program, Session, SessionId};
 use crate::notify::{self, Notifier};
 use crate::status::{self, State};
+use crate::usage::{self, Limit};
 use crate::settings::Settings;
 use crate::caps::Caps;
 use crate::ci::{self, CiState, Job};
 use crate::git::{self, GitOp, OpResult, RepoStatus};
 use crate::gitui::{self, GitOverlay};
-use crate::hooks::{self, Decision, HookEvent, HookServer, PermissionRequest};
+use crate::hooks::{self, Decision, HookEvent, HookServer, PermissionRequest, StatusLine};
 use crate::ui::{self, Areas, Target, contains};
 use crate::{keys, mouse};
 
@@ -60,6 +61,12 @@ const FETCH_EVERY: Duration = Duration::from_secs(120);
 const CI_EXPECT_FOR: Duration = Duration::from_secs(120);
 /// …и проверяем так часто.
 const CI_EXPECT_POLL: Duration = Duration::from_secs(5);
+/// Лимиты Claude узнаём раз в столько…
+const USAGE_EVERY: Duration = Duration::from_secs(300);
+/// …после ответа Claude — если прошло хотя бы столько…
+const USAGE_AFTER_TURN: Duration = Duration::from_secs(60);
+/// …а при открытии окна лимитов — если старше этого.
+const USAGE_ON_OPEN: Duration = Duration::from_secs(20);
 
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static POINTER_SHAPES: AtomicBool = AtomicBool::new(false);
@@ -95,6 +102,10 @@ pub enum Event {
     Hook(SessionId, HookEvent),
     /// Кликнули по уведомлению этой сессии.
     OpenSession(SessionId),
+    /// Узнали лимиты Claude.
+    Usage(Result<Vec<Limit>, String>),
+    /// Claude обновил строку состояния: контекст и лимиты.
+    StatusLine(SessionId, StatusLine),
     /// Терминал пользователя пропал или vv попросили закрыться.
     Hangup,
 }
@@ -110,6 +121,8 @@ pub enum Overlay {
     Help,
     /// Меню веток, диалоги git, коммит.
     Git(GitOverlay),
+    /// Лимиты Claude, выбран лимит с этим номером.
+    Usage(usize),
 }
 
 pub enum Confirm {
@@ -143,6 +156,14 @@ pub struct App {
     focused: bool,
     last_git_tick: Instant,
     notifier: Notifier,
+    /// Лимиты Claude: последние, что удалось узнать.
+    pub usage: Vec<Limit>,
+    /// Почему не удалось узнать в последний раз.
+    pub usage_error: Option<String>,
+    pub usage_at: Option<Instant>,
+    pub usage_loading: bool,
+    /// Какие лимиты показывать внизу (из настроек).
+    pub usage_shown: Vec<String>,
     quit: bool,
 }
 
@@ -165,6 +186,7 @@ pub fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = Terminal::new(CrosstermBackend::new(BufWriter::with_capacity(FRAME_BUFFER, io::stdout())))?;
     let size = terminal.size()?;
+    let usage_shown = Settings::load(&home).usage_shown;
     let mut app = App {
         sessions: Vec::new(),
         selected: 0,
@@ -184,6 +206,11 @@ pub fn run() -> Result<()> {
         window_title: String::new(),
         focused: true,
         last_git_tick: Instant::now(),
+        usage: Vec::new(),
+        usage_error: None,
+        usage_at: None,
+        usage_loading: false,
+        usage_shown,
         stopping: Vec::new(),
         quit: false,
     };
@@ -240,6 +267,7 @@ impl App {
                 self.refresh_ci_if_due(self.selected);
             }
             self.refresh_ci_view();
+            self.refresh_usage(USAGE_EVERY);
             let banner_due = self.notifier.flush(terminal.backend_mut())?;
             let hold = self.current().and_then(Session::frame_hold);
             if dirty && hold.is_none() {
@@ -350,6 +378,10 @@ impl App {
                 if event.name != "PreToolUse" {
                     self.refresh_git(index);
                 }
+                // Claude ответил — лимиты сдвинулись.
+                if event.name == "Stop" {
+                    self.refresh_usage(USAGE_AFTER_TURN);
+                }
                 let session = &mut self.sessions[index];
                 let before = session.status.state;
                 let worked = session.status.since.elapsed();
@@ -366,6 +398,32 @@ impl App {
                 }
                 self.mark_seen();
                 Ok(resolved || changed)
+            }
+            Event::StatusLine(id, line) => {
+                let Some(index) = self.index_of(id) else { return Ok(false) };
+                let changed = self.sessions[index].status_line != Some(line);
+                self.sessions[index].status_line = Some(line);
+                let mut limits = false;
+                if let Some(percent) = line.five_hour {
+                    limits |= usage::set_live(&mut self.usage, "session", percent);
+                }
+                if let Some(percent) = line.seven_day {
+                    limits |= usage::set_live(&mut self.usage, "week", percent);
+                }
+                Ok(limits || (changed && index == self.selected))
+            }
+            Event::Usage(result) => {
+                self.usage_loading = false;
+                self.usage_at = Some(Instant::now());
+                match result {
+                    Ok(limits) => {
+                        self.usage = limits;
+                        self.usage_error = None;
+                    }
+                    // Прошлые цифры не выкидываем — показываем, почему не обновились.
+                    Err(text) => self.usage_error = Some(text),
+                }
+                Ok(true)
             }
             Event::OpenSession(id) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
@@ -538,9 +596,25 @@ impl App {
 
     fn on_overlay_key(&mut self, key: KeyEvent) -> Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let usage_rows = ui::usage_rows(self).len().max(1);
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Help => self.overlay = Overlay::None,
+            Overlay::Usage(cursor) => {
+                let len = usage_rows;
+                match keys::latin(key.code) {
+                    KeyCode::Esc => self.overlay = Overlay::None,
+                    _ if keys::is_prefix(&key) => self.overlay = Overlay::None,
+                    KeyCode::Up => *cursor = (*cursor + len - 1) % len,
+                    KeyCode::Down | KeyCode::Tab => *cursor = (*cursor + 1) % len,
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        let index = *cursor;
+                        self.toggle_usage(index);
+                    }
+                    KeyCode::Char('r' | 'R') => self.refresh_usage(Duration::ZERO),
+                    _ => return Ok(false),
+                }
+            }
             Overlay::Git(git) => {
                 let command = gitui::on_key(git, key);
                 return Ok(self.apply_git(command));
@@ -614,6 +688,10 @@ impl App {
             Action::Quit if self.sessions.is_empty() => self.quit = true,
             Action::Quit => self.overlay = Overlay::Confirm(Confirm::Quit),
             Action::Help => self.overlay = Overlay::Help,
+            Action::Usage => {
+                self.overlay = Overlay::Usage(0);
+                self.refresh_usage(USAGE_ON_OPEN);
+            }
             Action::NextWaiting => {
                 if let Some(&index) = status::queue(&self.sessions, self.selected).first() {
                     self.select(index)?;
@@ -688,6 +766,10 @@ impl App {
                     dirty = true;
                 }
                 (Overlay::Git(git), Some(Target::Git(t))) => dirty |= gitui::hover(git, t),
+                (Overlay::Usage(cursor), Some(Target::UsageRow(i))) if *cursor != i => {
+                    *cursor = i;
+                    dirty = true;
+                }
                 _ => {}
             },
             MouseEventKind::Down(MouseButton::Left) => {
@@ -706,6 +788,7 @@ impl App {
                     }
                     Overlay::Picker(_) => !ui::picker_contains(full, column, row),
                     Overlay::Git(git) => gitui::closes_on_outside_click(git, full, column, row),
+                    Overlay::Usage(_) => !ui::usage_contains(self, column, row),
                     _ => false,
                 };
                 if outside {
@@ -758,6 +841,12 @@ impl App {
             Target::MenuButton => self.overlay = Overlay::Menu(self.selected),
             Target::Branch => self.open_git_menu(),
             Target::Ci => self.open_ci(),
+            Target::Usage => self.perform(Action::Usage)?,
+            Target::UsageRow(index) => {
+                self.overlay = Overlay::Usage(index);
+                self.toggle_usage(index);
+            }
+            Target::UsageRefresh => self.refresh_usage(Duration::ZERO),
             Target::Git(t) => {
                 if let Overlay::Git(git) = &mut self.overlay {
                     let command = gitui::click(git, t);
@@ -1009,6 +1098,34 @@ impl App {
         let Some(overlay) = gitui::open_ci(&state) else { return };
         self.overlay = Overlay::Git(overlay);
         self.refresh_ci_view();
+    }
+
+    /// Узнать лимиты Claude в фоне, если последние старше `older_than`.
+    fn refresh_usage(&mut self, older_than: Duration) {
+        if self.usage_loading || self.usage_at.is_some_and(|at| at.elapsed() < older_than) {
+            return;
+        }
+        self.usage_loading = true;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(Event::Usage(usage::fetch()));
+        });
+    }
+
+    /// Галочка у лимита: показывать его внизу или нет. Запоминается в настройках.
+    fn toggle_usage(&mut self, index: usize) {
+        let Some(key) = ui::usage_rows(self).into_iter().nth(index).map(|row| row.key) else { return };
+        match self.usage_shown.iter().position(|shown| *shown == key) {
+            Some(position) => {
+                self.usage_shown.remove(position);
+            }
+            None => self.usage_shown.push(key),
+        }
+        let mut settings = Settings::load(&self.home);
+        settings.usage_shown = self.usage_shown.clone();
+        if let Err(err) = settings.save(&self.home) {
+            self.set_flash(format!("не сохранилось: {err}"));
+        }
     }
 
     /// Окно CI открыто: задачи загружаются сразу и обновляются сами, пока

@@ -126,7 +126,39 @@ pub fn settings_json(vv_exe: &Path) -> String {
     for event in NOTIFY_EVENTS {
         hooks.insert(event.into(), json!([{ "matcher": "*", "hooks": [notify.clone()] }]));
     }
-    json!({ "hooks": hooks }).to_string()
+    // Строка состояния: так Claude сообщает заполнение контекста и лимиты.
+    // Своя строка пользователя не пропадает — `vv hook statusline` её запускает.
+    let status_line = json!({ "type": "command", "command": format!("{} hook statusline", shell_quote(&exe)), "padding": 0 });
+    json!({ "hooks": hooks, "statusLine": status_line }).to_string()
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Что Claude показал бы в строке состояния: заполнение контекста и лимиты.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StatusLine {
+    /// Контекст чата занят на столько процентов…
+    pub context: Option<f64>,
+    /// …из стольких токенов.
+    pub context_size: Option<u64>,
+    /// Лимит 5 часов и недельный, проценты.
+    pub five_hour: Option<f64>,
+    pub seven_day: Option<f64>,
+}
+
+impl StatusLine {
+    fn from_payload(payload: &Value) -> Self {
+        let window = &payload["context_window"];
+        let limits = &payload["rate_limits"];
+        Self {
+            context: window["used_percentage"].as_f64(),
+            context_size: window["context_window_size"].as_u64(),
+            five_hour: limits["five_hour"]["used_percentage"].as_f64(),
+            seven_day: limits["seven_day"]["used_percentage"].as_f64(),
+        }
+    }
 }
 
 /// Сокет окна vv. Убирается, когда окно закрывается.
@@ -171,6 +203,10 @@ fn serve(stream: UnixStream, tx: Sender<Event>) {
     let tool_use_id = payload["tool_use_id"].as_str().map(str::to_string);
     match message["event"].as_str() {
         Some("permission") => {}
+        Some("status") => {
+            let _ = tx.send(Event::StatusLine(session as SessionId, StatusLine::from_payload(payload)));
+            return;
+        }
         // Клик по уведомлению в VibeTerminal.
         Some("open") => {
             let _ = tx.send(Event::OpenSession(session as SessionId));
@@ -237,6 +273,14 @@ fn try_run_hook(event: &str) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let payload: Value = serde_json::from_str(&input)?;
+    if event == "statusline" {
+        let message = json!({ "session": session, "event": "status", "payload": payload });
+        if let Ok(mut stream) = UnixStream::connect(&socket) {
+            let _ = stream.write_all(format!("{message}\n").as_bytes());
+        }
+        run_user_status_line(&payload, &input);
+        return Ok(());
+    }
 
     let mut stream = UnixStream::connect(socket)?;
     let message = json!({ "session": session, "event": event, "at": status::now_ms(), "payload": payload });
@@ -249,6 +293,39 @@ fn try_run_hook(event: &str) -> Result<()> {
     stream.read_to_string(&mut response)?;
     print!("{response}");
     Ok(())
+}
+
+/// Своя строка состояния пользователя (из настроек проекта или
+/// `~/.claude`): vv поставил свою поверх, поэтому запускает её сам.
+fn run_user_status_line(payload: &Value, input: &str) {
+    use std::process::{Command, Stdio};
+    let cwd = PathBuf::from(payload["workspace"]["current_dir"].as_str().or(payload["cwd"].as_str()).unwrap_or("."));
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+    let files = [
+        cwd.join(".claude/settings.local.json"),
+        cwd.join(".claude/settings.json"),
+        home.join(".claude/settings.local.json"),
+        home.join(".claude/settings.json"),
+    ];
+    let command = files.iter().find_map(|file| {
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+        let command = settings["statusLine"]["command"].as_str()?;
+        (!command.contains("hook statusline")).then(|| command.to_string())
+    });
+    let Some(command) = command else { return };
+    let child = Command::new("sh")
+        .args(["-c", &command])
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = child {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(input.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }
 
 /// Что просит Claude, по-человечески: «Выполнить команду» и сама команда.
@@ -373,6 +450,21 @@ mod tests {
         assert_eq!(stop["args"], json!(["hook", "event"]));
         assert_eq!(stop["async"], true);
         assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["async"], true);
+        let quoted: Value = serde_json::from_str(&settings_json(Path::new("/Apps/Vibe Terminal.app/vv"))).unwrap();
+        assert_eq!(quoted["statusLine"]["command"], "'/Apps/Vibe Terminal.app/vv' hook statusline");
+    }
+
+    #[test]
+    fn reads_status_line_payload() {
+        let payload = json!({
+            "context_window": {"used_percentage": 42.5, "context_window_size": 200000},
+            "rate_limits": {"five_hour": {"used_percentage": 38, "resets_at": "x"}}
+        });
+        let status = StatusLine::from_payload(&payload);
+        assert_eq!(status.context, Some(42.5));
+        assert_eq!(status.context_size, Some(200_000));
+        assert_eq!(status.five_hour, Some(38.0));
+        assert_eq!(status.seven_day, None);
     }
 
     #[test]

@@ -238,6 +238,8 @@ struct VvSettings: Codable, Equatable {
     var notifyFailed = true
     var notifyBanner = true
     var notifySound = "Glass"
+    /// Какие лимиты vv показывает внизу — выбирают галочками в самом vv.
+    var usageShown = ["context", "session"]
 
     enum CodingKeys: String, CodingKey {
         case projectsDirs = "projects_dirs"
@@ -250,6 +252,7 @@ struct VvSettings: Codable, Equatable {
         case notifyFailed = "notify_failed"
         case notifyBanner = "notify_banner"
         case notifySound = "notify_sound"
+        case usageShown = "usage_shown"
     }
 
     init() {}
@@ -267,6 +270,7 @@ struct VvSettings: Codable, Equatable {
         notifyFailed = try container.decodeIfPresent(Bool.self, forKey: .notifyFailed) ?? defaults.notifyFailed
         notifyBanner = try container.decodeIfPresent(Bool.self, forKey: .notifyBanner) ?? defaults.notifyBanner
         notifySound = try container.decodeIfPresent(String.self, forKey: .notifySound) ?? defaults.notifySound
+        usageShown = try container.decodeIfPresent([String].self, forKey: .usageShown) ?? defaults.usageShown
     }
 
     static var url: URL {
