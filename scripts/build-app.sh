@@ -9,11 +9,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZIG="${ZIG:-$HOME/.local/share/zig/zig-aarch64-macos-0.15.2/zig}"
 OUT="$ROOT/dist/VibeTerminal.app"
 
+# Версия одна на приложение и vv — из Cargo.toml. По ней приложение
+# сравнивает себя с последним релизом на GitHub. Номер сборки — число
+# коммитов: растёт с каждой версией.
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+BUILD="$(git -C "$ROOT" rev-list --count HEAD)"
+
 echo "→ собираю vv"
 (cd "$ROOT" && cargo build --release --quiet)
 
 echo "→ собираю терминал (Zig + Xcode, первый раз долго)"
-(cd "$ROOT/terminal" && "$ZIG" build -Doptimize=ReleaseFast)
+# Версия явно: иначе сборка Ghostty ищет её в git-теге и падает на наших
+# тегах релизов (v0.1.0 — не его версия).
+(cd "$ROOT/terminal" && "$ZIG" build -Doptimize=ReleaseFast -Dversion-string="$VERSION")
 
 echo "→ упаковываю"
 rm -rf "$OUT"
@@ -24,11 +32,6 @@ cp "$ROOT/target/release/vv" "$OUT/Contents/MacOS/vv"
 # (Ghostty). Меняем в готовом приложении, чтобы не трогать сборку Ghostty.
 /usr/libexec/PlistBuddy -c "Set :CFBundleName VibeTerminal" "$OUT/Contents/Info.plist"
 
-# Версия одна на приложение и vv — из Cargo.toml. По ней приложение
-# сравнивает себя с последним релизом на GitHub. Номер сборки — число
-# коммитов: растёт с каждой версией.
-VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
-BUILD="$(git -C "$ROOT" rev-list --count HEAD)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$OUT/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$OUT/Contents/Info.plist"
 
