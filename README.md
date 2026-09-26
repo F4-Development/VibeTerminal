@@ -2,6 +2,10 @@
 
 Терминал для вайбкодинга с Claude Code под macOS. В одном окне работают несколько Claude, видно, кто работает и кто ждёт; на запросы разрешений отвечаешь кнопками. Интерфейс на русском.
 
+## Установка
+
+Скачай `VibeTerminal-<версия>.zip` из [последнего релиза](https://github.com/F4-Development/VibeTerminal/releases/latest), распакуй и перенеси VibeTerminal в «Программы». Нужен [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Дальше приложение обновляется само: когда выйдет новая версия, появится окно «Доступно новое обновление».
+
 ## Из чего состоит
 
 | Папка | Что там |
@@ -45,7 +49,7 @@ scripts/release.sh              # сборка, VibeTerminal-<версия>.zip,
 scripts/release.sh notes.md     # то же, описание из файла
 ```
 
-Нужен `gh auth login`. Установленные VibeTerminal увидят релиз при запуске (и раз в 6 часов) и предложат обновиться в один клик.
+Нужны `gh auth login`, сертификат «Developer ID Application» в связке ключей и доступ к нотаризации (`xcrun notarytool store-credentials vibeterminal …`, подробнее — в начале `scripts/release.sh`): скрипт подписывает приложение, отправляет его Apple на нотаризацию и вшивает билет. Установленные VibeTerminal увидят релиз при запуске (и раз в 6 часов) и предложат обновиться в один клик.
 
 ## Лицензии
 

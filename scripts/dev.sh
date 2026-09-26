@@ -13,6 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${VV_APP:-/Applications/VibeTerminal.app}"
 cd "$ROOT"
+source "$ROOT/scripts/signing.sh"
 
 if [ ! -d "$APP" ]; then
     echo "нет $APP — сначала scripts/build-app.sh --install" >&2
@@ -28,7 +29,7 @@ install_vv() {
     # файл, а у нового свой inode — macOS не спутает подпись со старой.
     local next="$APP/Contents/MacOS/.vv.next"
     cp target/release/vv "$next"
-    codesign --force --sign - "$next" 2>/dev/null
+    sign_vv "$next" 2>/dev/null
     mv -f "$next" "$APP/Contents/MacOS/vv"
     echo "$(date +%H:%M:%S) vv обновлён — окна VibeTerminal перезагрузятся за несколько секунд"
 }

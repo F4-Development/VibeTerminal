@@ -41,10 +41,10 @@ PLIST="$OUT/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations array" -c "Add :CFBundleLocalizations:0 string ru" "$PLIST"
 cp -R "$ROOT/assets/app/ru.lproj" "$OUT/Contents/Resources/"
 
-# Подпись для запуска на этом маке: сначала vv, потом всё приложение,
-# сохраняя entitlements, с которыми его подписал Xcode.
-codesign --force --sign - "$OUT/Contents/MacOS/vv"
-codesign --force --sign - --preserve-metadata=entitlements,requirements,flags,runtime "$OUT"
+# Подпись: Developer ID, если есть сертификат, иначе локальная.
+source "$ROOT/scripts/signing.sh"
+echo "→ подписываю: ${SIGN_IDENTITY:-локально, только для этого мака}"
+sign_app "$OUT"
 codesign --verify --deep --strict "$OUT"
 echo "готово: $OUT ($VERSION, сборка $BUILD)"
 

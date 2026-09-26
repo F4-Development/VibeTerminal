@@ -2,6 +2,7 @@
 import AppKit
 import Combine
 import CryptoKit
+import Security
 import SwiftUI
 
 /// Обновления VibeTerminal. При запуске и раз в 6 часов смотрим последний
@@ -210,8 +211,17 @@ final class VibeUpdater: ObservableObject {
         }
         // Служебные метки «скачано из интернета» — прочь, иначе macOS не даст запустить.
         _ = Self.run("/usr/bin/xattr", ["-cr", app.path])
-        guard Self.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path]) else {
+        // Подписано нами: если это приложение подписано Developer ID, то и
+        // обновление — той же командой и одобрено Apple (нотаризация).
+        var verify = ["--verify", "--deep", "--strict"]
+        if let team = Self.team {
+            verify.append("-R=anchor apple generic and certificate leaf[subject.OU] = \"\(team)\"")
+        }
+        guard Self.run("/usr/bin/codesign", verify + [app.path]) else {
             return fail("Подпись обновления не сходится")
+        }
+        if Self.team != nil, !Self.run("/usr/sbin/spctl", ["--assess", "--type", "execute", app.path]) {
+            return fail("Обновление не одобрено Apple")
         }
         DispatchQueue.main.async { self.phase = .installing }
         do {
@@ -247,6 +257,19 @@ final class VibeUpdater: ObservableObject {
         isInstalling = true
         NSApp.terminate(nil)
     }
+
+    /// Команда разработчика из подписи этого приложения; `nil` — локальная
+    /// сборка без Developer ID.
+    static let team: String? = {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess
+        else { return nil }
+        return (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String
+    }()
 
     static func sha256(of url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
