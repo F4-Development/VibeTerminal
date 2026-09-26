@@ -27,6 +27,7 @@ use signal_hook::iterator::Signals;
 
 use crate::menu::{self, Action};
 use crate::picker::Picker;
+use crate::reload;
 use crate::saved::{self, SavedSession, SavedWindow};
 use crate::session::{self, Launch, Program, Session, SessionId};
 use crate::notify::{self, Notifier};
@@ -115,6 +116,8 @@ pub enum Event {
     StatusLine(SessionId, StatusLine),
     /// Голос распознан (или нет).
     VoiceText(SessionId, Result<String, String>),
+    /// Проверили новую версию vv: запускается или нет.
+    ReloadChecked(PathBuf, bool),
     /// Терминал пользователя пропал или vv попросили закрыться.
     Hangup,
 }
@@ -184,10 +187,16 @@ pub struct App {
     pub voice: VoiceState,
     /// Когда последний раз распознавали — чтобы выгрузить модель без дела.
     voice_used: Option<Instant>,
+    /// Следим за файлом vv — обновился, перезапускаемся с теми же сессиями.
+    reload: Option<reload::Watch>,
+    /// Новая версия проверена и ждёт, когда закроют окна поверх.
+    reload_ready: Option<PathBuf>,
     quit: bool,
 }
 
 pub fn run() -> Result<()> {
+    // Перезапуск после обновления vv: сессии передала прежняя версия.
+    let handoff = reload::take();
     let cwd = std::env::current_dir().context("не могу определить текущую папку")?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| cwd.clone());
     let (tx, rx) = mpsc::channel();
@@ -233,6 +242,8 @@ pub fn run() -> Result<()> {
         usage_shown,
         voice: VoiceState::Idle,
         voice_used: None,
+        reload: reload::Watch::new(),
+        reload_ready: None,
         stopping: Vec::new(),
         quit: false,
     };
@@ -241,7 +252,8 @@ pub fn run() -> Result<()> {
     // что были открыты до перезапуска, а нет таких — выбор проекта.
     // Из терминала в папке проекта — сразу Claude там.
     let from_dock = cwd == app.home || cwd == Path::new("/");
-    let restored = from_dock && saved::claim(&app.home).is_some_and(|window| app.restore(window));
+    let adopted = handoff.is_some_and(|handoff| app.adopt(handoff));
+    let restored = adopted || (from_dock && saved::claim(&app.home).is_some_and(|window| app.restore(window)));
     let started = if restored {
         Ok(())
     } else if from_dock {
@@ -301,6 +313,23 @@ impl App {
             self.refresh_usage(USAGE_EVERY);
             let banner_due = self.notifier.flush(terminal.backend_mut())?;
             dirty |= !matches!(self.voice, VoiceState::Idle);
+            // Файл vv обновился — проверить новую версию в фоне.
+            if let Some(path) = self.reload.as_mut().and_then(reload::Watch::poll) {
+                let tx = self.tx.clone();
+                thread::spawn(move || {
+                    let works = reload::works(&path);
+                    let _ = tx.send(Event::ReloadChecked(path, works));
+                });
+            }
+            // Проверена — перезапуститься, когда поверх ничего не открыто.
+            if self.reload_ready.is_some()
+                && matches!(self.overlay, Overlay::None)
+                && matches!(self.voice, VoiceState::Idle)
+                && let Some(path) = self.reload_ready.take()
+            {
+                self.hot_reload(&path, terminal)?;
+                dirty = true;
+            }
             if self.voice_used.is_some_and(|at| at.elapsed() >= VOICE_UNLOAD) && matches!(self.voice, VoiceState::Idle) {
                 self.voice_used = None;
                 thread::spawn(voice::unload);
@@ -475,6 +504,14 @@ impl App {
                     }
                     (Ok(_), None) => {}
                     (Err(text), _) => self.set_flash(format!("Голос: {text}")),
+                }
+                Ok(true)
+            }
+            Event::ReloadChecked(path, works) => {
+                if works {
+                    self.reload_ready = Some(path);
+                } else {
+                    self.set_flash("Новая сборка vv не запускается — работаю на прежней");
                 }
                 Ok(true)
             }
@@ -998,6 +1035,64 @@ impl App {
         let folder = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
         let args = Settings::load(&self.home).claude_args();
         self.spawn_session(folder, dir, Program::Claude(args))
+    }
+
+    /// Перезапуститься новой версией vv тем же процессом, отдав ей сессии:
+    /// терминалы с Claude остаются открытыми, Claude работает дальше.
+    fn hot_reload(&mut self, path: &Path, terminal: &mut Screen) -> Result<()> {
+        let handoff = reload::Handoff {
+            sessions: self.sessions.iter().filter_map(Session::handoff).collect(),
+            selected: self.selected,
+            show_sidebar: self.show_sidebar,
+        };
+        let file = reload::write(&self.home, &handoff)?;
+        self.save_state();
+        voice::unload();
+        terminal.backend_mut().flush()?;
+        // Экран не трогаем — новая версия сразу нарисует своё поверх.
+        // Обычный режим терминала возвращаем, чтобы новая версия запомнила
+        // его как исходный.
+        if KEYBOARD_ENHANCED.load(Ordering::Relaxed) {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        let _ = terminal::disable_raw_mode();
+        let err = reload::exec(path, &file);
+        // Не вышло — работаем дальше прежней версией.
+        let _ = std::fs::remove_file(&file);
+        setup_terminal()?;
+        self.set_flash(format!("Новая версия vv не запустилась: {err}"));
+        Ok(())
+    }
+
+    /// Принять сессии от прежней версии vv после перезагрузки. `false` —
+    /// принять нечего.
+    fn adopt(&mut self, handoff: reload::Handoff) -> bool {
+        let agent = self.areas.agent;
+        let size = (agent.height.max(1), agent.width.max(1));
+        for handed in &handoff.sessions {
+            let (id, tx) = (handed.id, self.tx.clone());
+            let adopted = Session::adopt(handed, size, move |chunk| {
+                let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
+            });
+            match adopted {
+                Ok(session) => self.sessions.push(session),
+                Err(err) => self.set_flash(err.to_string()),
+            }
+            self.next_id = self.next_id.max(handed.id + 1);
+        }
+        if self.sessions.is_empty() {
+            return false;
+        }
+        self.show_sidebar = handoff.show_sidebar;
+        let _ = self.relayout(self.areas.full);
+        let _ = self.select(handoff.selected.min(self.sessions.len() - 1));
+        // Экран уже как был, но пусть Claude перерисуется — на случай, если
+        // что-то вывел, пока vv перезапускался.
+        for session in &mut self.sessions {
+            session.redraw();
+        }
+        self.set_flash("vv обновился — сессии на месте");
+        true
     }
 
     /// Вернуть сессии, открытые до перезапуска: диалоги Claude продолжаются

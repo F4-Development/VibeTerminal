@@ -9,6 +9,7 @@ mod menu;
 mod mouse;
 mod notify;
 mod picker;
+mod reload;
 mod saved;
 mod session;
 mod settings;

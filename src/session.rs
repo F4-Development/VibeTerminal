@@ -1,18 +1,21 @@
 //! Одна сессия Claude Code: процесс в PTY и эмулятор его экрана.
 
 use std::collections::VecDeque;
+use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
 use crate::ci::CiState;
 use crate::git::RepoStatus;
 use crate::hooks::{self, Decision, HookEvent, PermissionRequest, StatusLine};
+use crate::reload::HandedSession;
 use crate::status::{State, Status};
 
 const SCROLLBACK_LINES: usize = 10_000;
@@ -171,22 +174,112 @@ impl Session {
         let pid = child.process_id().context("у claude нет pid")? as i32;
         LIVE_PIDS.lock().unwrap().push(pid);
 
-        let mut reader = pty.master.try_clone_reader()?;
+        let reader = pty.master.try_clone_reader()?;
         let writer = pty.master.take_writer()?;
-        thread::spawn(move || {
-            let mut buf = [0u8; 16 * 1024];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => on_output(Some(buf[..n].to_vec())),
-                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-            on_output(None);
-        });
+        read_output(reader, on_output);
+        let is_command = matches!(program, Program::Command(_));
+        Ok(Self::assemble(id, name, cwd, (rows, cols), pty.master, writer, child, pid, is_command))
+    }
 
-        Ok(Self {
+    /// Новая версия vv после перезагрузки принимает сессию старой: терминал
+    /// уже открыт, Claude работает. Экран и режимы — как были.
+    pub fn adopt(
+        handed: &HandedSession,
+        (rows, cols): (u16, u16),
+        on_output: impl Fn(Option<Vec<u8>>) + Send + 'static,
+    ) -> Result<Self> {
+        // SAFETY: fd открыт старой версией и передан нам через `exec`;
+        // проверяем, что он живой, прежде чем владеть им.
+        if unsafe { libc::fcntl(handed.fd, libc::F_GETFD) } == -1 {
+            anyhow::bail!("терминал сессии «{}» не дошёл", handed.name);
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(handed.fd) };
+        // SAFETY: fcntl на своём fd.
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        let master = AdoptedMaster { fd };
+        let reader = master.try_clone_reader()?;
+        let writer = master.take_writer()?;
+        read_output(reader, on_output);
+        LIVE_PIDS.lock().unwrap().push(handed.pid);
+        let child = Box::new(AdoptedChild { pid: handed.pid });
+        let path = Path::new(&handed.cwd);
+        let mut session = Self::assemble(
+            handed.id,
+            handed.name.clone(),
+            path,
+            (rows, cols),
+            Box::new(master),
+            writer,
+            child,
+            handed.pid,
+            handed.is_command,
+        );
+        session.parser.process(handed.screen.as_bytes());
+        session.status = Status::restored(State::from_name(&handed.state), handed.detail.clone(), handed.since_secs);
+        session.claude_id.clone_from(&handed.claude_id);
+        session.transcript.clone_from(&handed.transcript);
+        Ok(session)
+    }
+
+    /// Отдать сессию новой версии vv: терминал остаётся открытым через
+    /// `exec`, экран и режимы — в виде байтов для vt100.
+    pub fn handoff(&self) -> Option<HandedSession> {
+        let fd = self.master.as_raw_fd()?;
+        // Терминал должен пережить `exec`.
+        // SAFETY: fcntl на своём fd.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        let screen = self.parser.screen();
+        let mut state = Vec::new();
+        if screen.alternate_screen() {
+            state.extend_from_slice(b"\x1b[?1049h");
+        }
+        state.extend(screen.state_formatted());
+        let term = self.parser.callbacks();
+        if term.focus_events {
+            state.extend_from_slice(b"\x1b[?1004h");
+        }
+        if let Some(style) = term.cursor_style {
+            state.extend(format!("\x1b[{style} q").into_bytes());
+        }
+        if !term.title.is_empty() {
+            state.extend(format!("\x1b]2;{}\x07", term.title.replace(['\x07', '\x1b'], "")).into_bytes());
+        }
+        Some(HandedSession {
+            id: self.id,
+            name: self.name.clone(),
+            cwd: self.cwd.clone(),
+            fd,
+            pid: self.pid,
+            is_command: self.is_command,
+            claude_id: self.claude_id.clone(),
+            transcript: self.transcript.clone(),
+            state: self.status.state.name().to_string(),
+            detail: self.status.detail.clone(),
+            since_secs: self.status.since.elapsed().as_secs(),
+            screen: String::from_utf8_lossy(&state).into_owned(),
+        })
+    }
+
+    /// Попросить программу перерисоваться целиком: размер туда и обратно.
+    pub fn redraw(&mut self) {
+        let (rows, cols) = self.parser.screen().size();
+        let _ = self.master.resize(pty_size(rows, cols.saturating_sub(1).max(1)));
+        let _ = self.master.resize(pty_size(rows, cols));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        id: SessionId,
+        name: String,
+        cwd: &Path,
+        (rows, cols): (u16, u16),
+        master: Box<dyn MasterPty + Send>,
+        writer: Box<dyn Write + Send>,
+        child: Box<dyn Child + Send + Sync>,
+        pid: i32,
+        is_command: bool,
+    ) -> Self {
+        Self {
             id,
             name,
             cwd: cwd.to_path_buf(),
@@ -199,20 +292,20 @@ impl Session {
             ci_refreshing: false,
             ci_due: None,
             ci_expect: None,
-            is_command: matches!(program, Program::Command(_)),
+            is_command,
             status: Status::default(),
             status_line: None,
             claude_id: None,
             transcript: None,
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
-            master: pty.master,
+            master,
             writer,
             child,
             pid,
             exit_code: None,
             sync_since: None,
             prompt: PromptWatch::default(),
-        })
+        }
     }
 
     pub fn screen(&self) -> &vt100::Screen {
@@ -468,6 +561,126 @@ pub fn hangup_all_live() {
 
 fn pty_size(rows: u16, cols: u16) -> PtySize {
     PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }
+}
+
+/// Вывод программы — в `on_output` из отдельного потока; `None` — терминал закрыт.
+fn read_output(mut reader: Box<dyn Read + Send>, on_output: impl Fn(Option<Vec<u8>>) + Send + 'static) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => on_output(Some(buf[..n].to_vec())),
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        on_output(None);
+    });
+}
+
+/// Терминал, открытый прежней версией vv и принятый после перезагрузки.
+struct AdoptedMaster {
+    fd: OwnedFd,
+}
+
+impl MasterPty for AdoptedMaster {
+    fn resize(&self, size: PtySize) -> Result<(), anyhow::Error> {
+        let winsize = libc::winsize { ws_row: size.rows, ws_col: size.cols, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: ioctl с правильной структурой на своём fd.
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCSWINSZ, &winsize) } == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    fn get_size(&self) -> Result<PtySize, anyhow::Error> {
+        let mut winsize = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: ioctl с правильной структурой на своём fd.
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCGWINSZ, &mut winsize) } == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(pty_size(winsize.ws_row, winsize.ws_col))
+    }
+
+    fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>, anyhow::Error> {
+        Ok(Box::new(File::from(self.fd.try_clone()?)))
+    }
+
+    fn take_writer(&self) -> Result<Box<dyn Write + Send>, anyhow::Error> {
+        Ok(Box::new(File::from(self.fd.try_clone()?)))
+    }
+
+    fn process_group_leader(&self) -> Option<libc::pid_t> {
+        // SAFETY: tcgetpgrp на своём fd.
+        let pgrp = unsafe { libc::tcgetpgrp(self.fd.as_raw_fd()) };
+        (pgrp > 0).then_some(pgrp)
+    }
+
+    fn as_raw_fd(&self) -> Option<RawFd> {
+        Some(self.fd.as_raw_fd())
+    }
+
+    fn tty_name(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// Процесс Claude, принятый после перезагрузки. После `exec` он остаётся
+/// нашим дочерним — ждём его обычным `waitpid`.
+#[derive(Debug)]
+struct AdoptedChild {
+    pid: i32,
+}
+
+impl AdoptedChild {
+    fn wait_with(&mut self, flags: i32) -> std::io::Result<Option<ExitStatus>> {
+        let mut status = 0;
+        // SAFETY: waitpid на свой дочерний процесс.
+        let done = unsafe { libc::waitpid(self.pid, &mut status, flags) };
+        match done {
+            0 => Ok(None),
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                // Уже подобран — считаем вышедшим.
+                if err.raw_os_error() == Some(libc::ECHILD) { Ok(Some(ExitStatus::with_exit_code(0))) } else { Err(err) }
+            }
+            _ if libc::WIFEXITED(status) => Ok(Some(ExitStatus::with_exit_code(libc::WEXITSTATUS(status) as u32))),
+            _ => Ok(Some(ExitStatus::with_exit_code(1))),
+        }
+    }
+}
+
+impl ChildKiller for AdoptedChild {
+    fn kill(&mut self) -> std::io::Result<()> {
+        // SAFETY: сигнал своему дочернему процессу.
+        if unsafe { libc::kill(self.pid, libc::SIGHUP) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+        Box::new(AdoptedChild { pid: self.pid })
+    }
+}
+
+impl Child for AdoptedChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.wait_with(libc::WNOHANG)
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        loop {
+            if let Some(status) = self.wait_with(0)? {
+                return Ok(status);
+            }
+        }
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(self.pid as u32)
+    }
 }
 
 /// Реакция эмулятора на то, что vt100 сам не обрабатывает.

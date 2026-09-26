@@ -41,7 +41,34 @@ impl Default for Status {
     }
 }
 
+impl State {
+    /// Имя для передачи новой версии vv при перезагрузке.
+    pub fn name(self) -> &'static str {
+        match self {
+            State::Idle => "idle",
+            State::Working => "working",
+            State::Done => "done",
+            State::Failed => "failed",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "working" => State::Working,
+            "done" => State::Done,
+            "failed" => State::Failed,
+            _ => State::Idle,
+        }
+    }
+}
+
 impl Status {
+    /// Статус, переданный старой версией vv при перезагрузке.
+    pub fn restored(state: State, detail: String, since_secs: u64) -> Self {
+        let since = Instant::now().checked_sub(Duration::from_secs(since_secs)).unwrap_or_else(Instant::now);
+        Self { state, since, detail, ..Self::default() }
+    }
+
     /// Событие от Claude. `true` — статус поменялся.
     pub fn on_event(&mut self, event: &HookEvent, cwd: &Path) -> bool {
         if event.at < self.last_event {

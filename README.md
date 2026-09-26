@@ -28,6 +28,15 @@ cargo install --path .
 vv
 ```
 
+## Разработка
+
+```sh
+scripts/dev.sh          # собрать vv и подменить его в установленном VibeTerminal
+scripts/dev.sh --watch  # и дальше — при каждом изменении src/
+```
+
+Открытые окна VibeTerminal сами замечают новую версию `vv` и перезагружаются: сессии с Claude не прерываются, экран остаётся как был. Можно править `vv` прямо из Claude, запущенного в VibeTerminal. Изменения в приложении (Swift, Zig) так не доедут — для них `scripts/build-app.sh --install` и перезапуск.
+
 ## Лицензии
 
 `terminal/` основан на Ghostty и распространяется по его лицензии MIT (`terminal/LICENSE`).
