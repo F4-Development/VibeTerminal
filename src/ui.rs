@@ -108,6 +108,8 @@ pub enum Target {
     Permit(usize, Decision),
     /// Ветка в шапке окна Claude — открывает меню git.
     Branch,
+    /// Значок CI в шапке.
+    Ci,
     /// Что-то в окнах git.
     Git(GitTarget),
 }
@@ -138,6 +140,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
         Overlay::None => {
             if branch_rect(app).is_some_and(|r| contains(r, column, row)) {
                 return Some(Target::Branch);
+            }
+            if ci_badge(app).is_some_and(|(_, _, r)| contains(r, column, row)) {
+                return Some(Target::Ci);
             }
             if let Some(bar) = permit_bar(app) {
                 if let Some((_, _, decision)) = bar.buttons.iter().find(|(r, _, _)| contains(*r, column, row)) {
@@ -484,10 +489,14 @@ fn draw_agent(frame: &mut Frame, app: &App) {
     }
     let area = app.areas.agent_frame;
     frame.render_widget(block, area);
-    // Шапка поверх верхней рамки: папка, ветка, изменения, путь.
+    // Шапка поверх верхней рамки: папка, ветка, изменения, путь; справа CI.
     if let Some(header) = header(app) {
         let line = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
         frame.render_widget(Paragraph::new(header.line), line);
+    }
+    if let Some((label, style, rect)) = ci_badge(app) {
+        let style = if app.hover == Some(Target::Ci) { primary() } else { style };
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
     }
     view::render(session.screen(), app.areas.agent, frame.buffer_mut(), app.caps.truecolor);
 }
@@ -533,6 +542,32 @@ fn header(app: &App) -> Option<Header> {
     }
     spans.push(Span::styled(format!("· {} ", display_path(&session.cwd, &app.home)), dim()));
     Some(Header { line: Line::from(spans), branch })
+}
+
+/// Значок CI справа в шапке: текст, цвет и где он.
+fn ci_badge(app: &App) -> Option<(String, Style, Rect)> {
+    use crate::ci::CiState;
+    let state = app.current()?.ci.as_ref()?;
+    let (label, style) = match state {
+        CiState::Unsupported => return None,
+        CiState::NeedCli(p) => (format!(" CI: нужен {} ", p.cli()), dim()),
+        CiState::NeedLogin(p) => (format!(" CI: войти в {} ", p.name()), accent()),
+        CiState::NoPipeline(_) => (" CI: не запускался ".to_string(), dim()),
+        CiState::Error(..) => (" CI: ошибка ".to_string(), Style::new().fg(Color::Red)),
+        CiState::Pipeline(_, pipeline) => {
+            let style = match pipeline.status {
+                crate::ci::CiStatus::Success => Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                crate::ci::CiStatus::Failed => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                crate::ci::CiStatus::Running | crate::ci::CiStatus::Pending => Style::new().fg(Color::Yellow),
+                _ => dim(),
+            };
+            (format!(" {} CI {} ", pipeline.status.icon(), pipeline.status.label()), style)
+        }
+    };
+    let area = app.areas.agent_frame;
+    let w = width(&label);
+    let rect = Rect::new(area.right().saturating_sub(w + 2), area.y, w, 1);
+    Some((label, style, rect))
 }
 
 /// Где в шапке ветка — под ней открывается меню git.

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::ci::CiState;
 use crate::git::RepoStatus;
 use crate::hooks::{self, Decision, HookEvent, PermissionRequest};
 
@@ -42,6 +43,14 @@ static LIVE_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 pub type SessionId = u64;
 
+/// Что запускается в сессии.
+pub enum Program {
+    /// Claude с этими флагами.
+    Claude(Vec<String>),
+    /// Просто команда — например, вход в glab.
+    Command(String),
+}
+
 /// Как запускать Claude в этом окне vv.
 pub struct Launch {
     pub truecolor: bool,
@@ -62,6 +71,13 @@ pub struct Session {
     pub git_busy: Option<&'static str>,
     pub git_refreshing: bool,
     pub last_fetch: Option<Instant>,
+    /// CI ветки; `None` — ещё не узнали.
+    pub ci: Option<CiState>,
+    pub ci_refreshing: bool,
+    /// Когда проверить CI снова; `None` — при первой возможности.
+    pub ci_due: Option<Instant>,
+    /// Сессия-команда (вход, установка), а не Claude.
+    pub is_command: bool,
     parser: vt100::Parser<Term>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -80,19 +96,21 @@ impl Session {
         cwd: &Path,
         (rows, cols): (u16, u16),
         launch: &Launch,
-        claude_args: &[String],
+        program: &Program,
         on_output: impl Fn(Option<Vec<u8>>) + Send + 'static,
     ) -> Result<Self> {
         let pty = native_pty_system().openpty(pty_size(rows, cols))?;
 
         // VV_CLAUDE — подменить команду (для отладки), например `VV_CLAUDE='seq 100; cat'`.
-        let mut cmd = match std::env::var("VV_CLAUDE") {
-            Ok(script) => {
-                let mut cmd = CommandBuilder::new("sh");
-                cmd.args(["-c", &script]);
-                cmd
-            }
-            Err(_) => {
+        let shell = |script: &str| {
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.args(["-c", script]);
+            cmd
+        };
+        let debug = std::env::var("VV_CLAUDE").ok();
+        let mut cmd = match (program, debug.as_ref()) {
+            (Program::Command(script), _) | (Program::Claude(_), Some(script)) => shell(script),
+            (Program::Claude(claude_args), None) => {
                 let mut cmd = CommandBuilder::new("claude");
                 cmd.args(["--settings", &hooks::settings_json(&launch.vv_exe)]);
                 // Модель, режим разрешений и флаги из настроек.
@@ -153,6 +171,10 @@ impl Session {
             git_busy: None,
             git_refreshing: false,
             last_fetch: None,
+            ci: None,
+            ci_refreshing: false,
+            ci_due: None,
+            is_command: matches!(program, Program::Command(_)),
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
             master: pty.master,
             writer,

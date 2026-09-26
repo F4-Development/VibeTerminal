@@ -26,9 +26,10 @@ use signal_hook::iterator::Signals;
 
 use crate::menu::{self, Action};
 use crate::picker::Picker;
-use crate::session::{self, Launch, Session, SessionId};
+use crate::session::{self, Launch, Program, Session, SessionId};
 use crate::settings::Settings;
 use crate::caps::Caps;
+use crate::ci::{self, CiState, Job};
 use crate::git::{self, GitOp, OpResult, RepoStatus};
 use crate::gitui::{self, GitOverlay};
 use crate::hooks::{Decision, HookEvent, HookServer, PermissionRequest};
@@ -73,6 +74,13 @@ pub enum Event {
     GitStatus(SessionId, Option<RepoStatus>),
     /// Закончилась команда git.
     GitDone(SessionId, GitOp, OpResult),
+    /// Узнали CI ветки.
+    CiUpdate(SessionId, String, CiState),
+    /// Задачи пайплайна для окна CI.
+    CiJobs(SessionId, String, Result<Vec<Job>, String>),
+    /// Логи упавших задач собраны — задание для Claude или ошибка.
+    CiFixReady(SessionId, Result<String, String>),
+    CiRetried(SessionId, Result<(), String>),
     /// Хук запроса закрылся сам — Claude больше не ждёт.
     PermissionGone(SessionId, u64),
     /// Claude сообщил, что сделал: выполнил инструмент, закончил ответ…
@@ -219,6 +227,7 @@ impl App {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
                     self.refresh_git(self.selected);
+                    self.refresh_ci_if_due(self.selected);
                     dirty = true;
                     continue;
                 }
@@ -318,11 +327,74 @@ impl App {
                 let session = &mut self.sessions[index];
                 session.git_refreshing = false;
                 let changed = session.git != status;
+                // Другая ветка — её CI узнаём сразу.
+                let branch = |s: &Option<RepoStatus>| s.as_ref().and_then(|g| g.branch.clone());
+                if branch(&session.git) != branch(&status) {
+                    session.ci = None;
+                    session.ci_due = None;
+                }
                 session.git = status;
+                self.refresh_ci_if_due(index);
                 Ok(changed && index == self.selected)
             }
             Event::GitDone(id, op, result) => {
                 self.on_git_done(id, op, result);
+                Ok(true)
+            }
+            Event::CiUpdate(id, branch, state) => {
+                let Some(index) = self.index_of(id) else { return Ok(false) };
+                let session = &mut self.sessions[index];
+                session.ci_refreshing = false;
+                // Пока узнавали, ветку могли сменить — такой ответ не нужен.
+                if session.git.as_ref().and_then(|g| g.branch.as_deref()) != Some(branch.as_str()) {
+                    return Ok(false);
+                }
+                let wait = match &state {
+                    CiState::Pipeline(_, p) if p.status.active() => Duration::from_secs(15),
+                    CiState::Pipeline(..) | CiState::NoPipeline(_) => Duration::from_secs(120),
+                    CiState::Unsupported => Duration::from_secs(3600),
+                    _ => Duration::from_secs(300),
+                };
+                session.ci_due = Some(Instant::now() + wait);
+                let changed = session.ci.as_ref() != Some(&state);
+                session.ci = Some(state);
+                Ok(changed && index == self.selected)
+            }
+            Event::CiJobs(id, pipeline, jobs) => {
+                if let Overlay::Git(GitOverlay::Ci(view)) = &mut self.overlay
+                    && self.sessions.get(self.selected).is_some_and(|s| s.id == id)
+                    && view.pipeline.id == pipeline
+                {
+                    view.jobs = Some(jobs);
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Event::CiFixReady(id, result) => {
+                match result {
+                    Ok(prompt) => {
+                        if let Some(index) = self.index_of(id) {
+                            let session = &mut self.sessions[index];
+                            let sent = session.paste(&prompt).and_then(|()| session.write(b"\r"));
+                            if sent.is_ok() {
+                                self.set_flash("Логи CI отправлены Claude");
+                            }
+                        }
+                    }
+                    Err(text) => self.set_flash(format!("CI: {text}")),
+                }
+                Ok(true)
+            }
+            Event::CiRetried(id, result) => {
+                match result {
+                    Ok(()) => {
+                        self.set_flash("Упавшие задачи перезапущены");
+                        if let Some(index) = self.index_of(id) {
+                            self.sessions[index].ci_due = Some(Instant::now() + Duration::from_secs(5));
+                        }
+                    }
+                    Err(text) => self.set_flash(format!("CI: {text}")),
+                }
                 Ok(true)
             }
             Event::Hangup => {
@@ -593,6 +665,7 @@ impl App {
         match target {
             Target::MenuButton => self.overlay = Overlay::Menu(self.selected),
             Target::Branch => self.open_git_menu(),
+            Target::Ci => self.open_ci(),
             Target::Git(t) => {
                 if let Overlay::Git(git) = &mut self.overlay {
                     let command = gitui::click(git, t);
@@ -636,16 +709,21 @@ impl App {
         }
     }
 
+    /// Новая сессия Claude в папке.
     fn open(&mut self, dir: &Path) -> Result<()> {
         let folder = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
-        let name = self.unique_name(&folder);
+        let args = Settings::load(&self.home).claude_args();
+        self.spawn_session(folder, dir, Program::Claude(args))
+    }
+
+    fn spawn_session(&mut self, name: String, dir: &Path, program: Program) -> Result<()> {
+        let name = self.unique_name(&name);
         let id = self.next_id;
         self.next_id += 1;
         let tx = self.tx.clone();
         let area = self.areas.agent;
         let (rows, cols) = (area.height.max(1), area.width.max(1));
-        let args = Settings::load(&self.home).claude_args();
-        let session = Session::spawn(id, name, dir, (rows, cols), &self.launch, &args, move |chunk| {
+        let session = Session::spawn(id, name, dir, (rows, cols), &self.launch, &program, move |chunk| {
             let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
         })?;
         self.sessions.push(session);
@@ -668,10 +746,18 @@ impl App {
         let Some(index) = self.index_of(id) else { return };
         let mut session = self.sessions.remove(index);
         let code = session.reap();
-        let note = match code {
-            0 => format!("«{}»: Claude закрылся", session.name),
-            code => format!("«{}»: Claude завершился с кодом {code}", session.name),
+        let note = match (session.is_command, code) {
+            (true, 0) => format!("«{}»: готово", session.name),
+            (true, code) => format!("«{}»: завершилось с кодом {code}", session.name),
+            (false, 0) => format!("«{}»: Claude закрылся", session.name),
+            (false, code) => format!("«{}»: Claude завершился с кодом {code}", session.name),
         };
+        // Вход или установка закончились — CI всех сессий узнаём заново.
+        if session.is_command {
+            for other in &mut self.sessions {
+                other.ci_due = None;
+            }
+        }
         self.set_flash(note);
         if index < self.selected {
             self.selected -= 1;
@@ -748,6 +834,10 @@ impl App {
         self.sessions[index].git_busy = None;
         self.refresh_git(index);
         let quiet = matches!(op, GitOp::Fetch { quiet: true });
+        // После отправки CI запускается — посмотрим на него скоро.
+        if result.is_ok() && matches!(op, GitOp::Push | GitOp::PushForce | GitOp::Commit { push: true, .. }) {
+            self.sessions[index].ci_due = Some(Instant::now() + Duration::from_secs(8));
+        }
         match result {
             Ok(message) if !quiet => self.set_flash(message),
             Ok(_) => {}
@@ -763,6 +853,37 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Проверить CI ветки в фоне, если пора.
+    fn refresh_ci_if_due(&mut self, index: usize) {
+        let Some(session) = self.sessions.get_mut(index) else { return };
+        let Some(branch) = session.git.as_ref().and_then(|g| g.branch.clone()) else { return };
+        if session.ci_refreshing || session.is_command || session.ci_due.is_some_and(|due| Instant::now() < due) {
+            return;
+        }
+        session.ci_refreshing = true;
+        let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let state = ci::state(&cwd, &branch);
+            let _ = tx.send(Event::CiUpdate(id, branch, state));
+        });
+    }
+
+    /// Клик по значку CI в шапке.
+    fn open_ci(&mut self) {
+        let Some(session) = self.current() else { return };
+        let Some(state) = session.ci.clone() else { return };
+        let Some(overlay) = gitui::open_ci(&state) else { return };
+        if let (GitOverlay::Ci(view), Some(session)) = (&overlay, self.current()) {
+            let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
+            let (provider, pipeline) = (view.provider.clone(), view.pipeline.clone());
+            thread::spawn(move || {
+                let jobs = ci::jobs(&cwd, &provider, &pipeline);
+                let _ = tx.send(Event::CiJobs(id, pipeline.id, jobs));
+            });
+        }
+        self.overlay = Overlay::Git(overlay);
     }
 
     fn open_git_menu(&mut self) {
@@ -787,6 +908,46 @@ impl App {
             gitui::Command::Run(op) => {
                 self.overlay = Overlay::None;
                 self.run_git(self.selected, op);
+                true
+            }
+            gitui::Command::OpenUrl(url) => {
+                let _ = std::process::Command::new("open").arg(url).spawn();
+                true
+            }
+            gitui::Command::CiFix => {
+                let Overlay::Git(GitOverlay::Ci(view)) = &self.overlay else { return false };
+                let Some(Ok(jobs)) = &view.jobs else {
+                    self.set_flash("Подожди — задачи CI ещё загружаются");
+                    return true;
+                };
+                let (provider, pipeline, jobs) = (view.provider.clone(), view.pipeline.clone(), jobs.clone());
+                self.overlay = Overlay::None;
+                let Some(session) = self.current() else { return true };
+                let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
+                self.set_flash("Скачиваю логи CI…");
+                thread::spawn(move || {
+                    let result = ci::failed_log(&cwd, &provider, &pipeline, &jobs).map(|path| ci::fix_prompt(&pipeline, &path));
+                    let _ = tx.send(Event::CiFixReady(id, result));
+                });
+                true
+            }
+            gitui::Command::CiRetry => {
+                let Overlay::Git(GitOverlay::Ci(view)) = &self.overlay else { return false };
+                let (provider, pipeline) = (view.provider.clone(), view.pipeline.clone());
+                self.overlay = Overlay::None;
+                let Some(session) = self.current() else { return true };
+                let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
+                thread::spawn(move || {
+                    let _ = tx.send(Event::CiRetried(id, ci::retry(&cwd, &provider, &pipeline)));
+                });
+                true
+            }
+            gitui::Command::Terminal { name, command } => {
+                self.overlay = Overlay::None;
+                let dir = self.current().map_or(self.home.clone(), |s| s.cwd.clone());
+                if let Err(err) = self.spawn_session(name, &dir, Program::Command(command)) {
+                    self.set_flash(format!("не запустилось: {err:#}"));
+                }
                 true
             }
             gitui::Command::AskClaude(text) => {

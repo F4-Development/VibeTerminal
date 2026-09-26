@@ -2,6 +2,7 @@ mod app;
 mod git;
 mod gitui;
 mod caps;
+mod ci;
 mod hooks;
 mod keys;
 mod menu;

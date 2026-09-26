@@ -11,6 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use crate::ci::{self, CiState, CiStatus, Job, Pipeline, Provider};
 use crate::git::{self, Branch, ChangedFile, Failure, GitOp, OpError, Operation, RepoStatus};
 use crate::keys;
 use crate::picker::score;
@@ -26,6 +27,7 @@ pub enum GitOverlay {
     Input(GitInput),
     Choice(GitChoice),
     Commit(CommitDialog),
+    Ci(CiView),
 }
 
 /// Что сделать vv в ответ на клавишу или клик.
@@ -36,6 +38,12 @@ pub enum Command {
     Run(GitOp),
     /// Отправить текст Claude в открытую сессию.
     AskClaude(String),
+    OpenUrl(String),
+    /// Скачать логи упавших задач и отдать Claude.
+    CiFix,
+    CiRetry,
+    /// Открыть сессию с командой (вход в glab/gh, установка).
+    Terminal { name: String, command: String },
 }
 
 /// Кликабельные места в окнах git.
@@ -342,6 +350,7 @@ pub struct GitChoice {
 pub enum ChoiceAction {
     Run(GitOp),
     AskClaude(String),
+    Terminal { name: String, command: String },
     Close,
 }
 
@@ -359,12 +368,14 @@ impl GitChoice {
         match std::mem::replace(&mut self.buttons[index].1, ChoiceAction::Close) {
             ChoiceAction::Run(op) => Command::Run(op),
             ChoiceAction::AskClaude(text) => Command::AskClaude(text),
+            ChoiceAction::Terminal { name, command } => Command::Terminal { name, command },
             ChoiceAction::Close => Command::Close,
         }
     }
 
     fn rect(&self, full: Rect) -> Rect {
-        centered(full, DIALOG_WIDTH, self.lines.len() as u16 + 5)
+        // Рамка, текст, пустая строка, кнопки.
+        centered(full, DIALOG_WIDTH, self.lines.len() as u16 + 4)
     }
 
     fn buttons(&self, full: Rect) -> Vec<Rect> {
@@ -548,6 +559,137 @@ impl CommitDialog {
     }
 }
 
+// ── CI ────────────────────────────────────────────────────────────────────
+
+pub struct CiView {
+    pub provider: Provider,
+    pub pipeline: Pipeline,
+    /// `None` — ещё грузятся.
+    pub jobs: Option<Result<Vec<Job>, String>>,
+    cursor: usize,
+}
+
+#[derive(Clone, Copy)]
+enum CiButton {
+    Fix,
+    Retry,
+    Browser,
+    Close,
+}
+
+impl CiView {
+    fn buttons(&self) -> Vec<(&'static str, CiButton)> {
+        let mut buttons = Vec::new();
+        if self.pipeline.status == CiStatus::Failed {
+            buttons.push((" Попросить Claude починить ", CiButton::Fix));
+        }
+        if matches!(self.pipeline.status, CiStatus::Failed | CiStatus::Canceled) {
+            buttons.push((" Перезапустить упавшие ", CiButton::Retry));
+        }
+        buttons.push((" Открыть в браузере ", CiButton::Browser));
+        buttons.push((" Закрыть ", CiButton::Close));
+        buttons
+    }
+
+    fn job_count(&self) -> usize {
+        match &self.jobs {
+            Some(Ok(jobs)) => jobs.len(),
+            _ => 1,
+        }
+    }
+
+    fn rect(&self, full: Rect) -> Rect {
+        centered(full, 76, (self.job_count() as u16 + 5).clamp(7, 26))
+    }
+
+    fn job_rows(&self, full: Rect) -> Vec<(Rect, usize)> {
+        let inner = frame_block("", true).inner(self.rect(full));
+        let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2));
+        let visible = list.height as usize;
+        let offset = self.cursor.saturating_sub(visible.saturating_sub(1));
+        (offset..self.job_count())
+            .take(visible)
+            .enumerate()
+            .map(|(row, i)| (Rect::new(list.x, list.y + row as u16, list.width, 1), i))
+            .collect()
+    }
+
+    fn button_rects(&self, full: Rect) -> Vec<Rect> {
+        let inner = frame_block("", true).inner(self.rect(full));
+        let y = inner.bottom().saturating_sub(1);
+        let mut x = inner.x + 1;
+        self.buttons()
+            .iter()
+            .map(|(label, _)| {
+                let rect = Rect::new(x, y, width(label), 1);
+                x += width(label) + 1;
+                rect
+            })
+            .collect()
+    }
+
+    fn press(&self, index: usize) -> Command {
+        match self.buttons().get(index).map(|(_, b)| *b) {
+            Some(CiButton::Fix) => Command::CiFix,
+            Some(CiButton::Retry) => Command::CiRetry,
+            Some(CiButton::Browser) => Command::OpenUrl(self.pipeline.url.clone()),
+            Some(CiButton::Close) => Command::Close,
+            None => Command::None,
+        }
+    }
+
+    fn open_job(&self, index: usize) -> Command {
+        match &self.jobs {
+            Some(Ok(jobs)) => jobs.get(index).map_or(Command::None, |j| Command::OpenUrl(j.url.clone())),
+            _ => Command::None,
+        }
+    }
+}
+
+/// Клик по значку CI: вход, установка или окно пайплайна.
+pub fn open_ci(state: &CiState) -> Option<GitOverlay> {
+    let overlay = match state {
+        CiState::Unsupported => return None,
+        CiState::NeedCli(provider) => GitOverlay::Choice(GitChoice::new(
+            &format!("Нужен {}", provider.cli()),
+            &format!("Статус CI из {} vv берёт через программу {}. Поставить её через Homebrew?", provider.name(), provider.cli()),
+            vec![
+                ("Поставить", ChoiceAction::Terminal {
+                    name: format!("установка {}", provider.cli()),
+                    command: provider.install_command(),
+                }),
+                ("Отмена", ChoiceAction::Close),
+            ],
+        )),
+        CiState::NeedLogin(provider) => GitOverlay::Choice(GitChoice::new(
+            &format!("Вход в {}", provider.name()),
+            &format!(
+                "Чтобы видеть CI, нужно один раз войти на {} через {}. Слева откроется сессия входа:                  там можно войти через браузер или вставить токен. Когда закончишь, она закроется сама.",
+                provider.host(),
+                provider.cli()
+            ),
+            vec![
+                ("Войти", ChoiceAction::Terminal { name: format!("вход {}", provider.host()), command: provider.login_command() }),
+                ("Отмена", ChoiceAction::Close),
+            ],
+        )),
+        CiState::NoPipeline(provider) => GitOverlay::Choice(GitChoice::new(
+            "CI ещё не запускался",
+            &format!("В {} для этой ветки пока нет ни одного запуска.", provider.name()),
+            vec![("ОК", ChoiceAction::Close)],
+        )),
+        CiState::Error(provider, text) => GitOverlay::Choice(GitChoice::new(
+            &format!("{}: не получилось узнать CI", provider.name()),
+            text,
+            vec![("ОК", ChoiceAction::Close)],
+        )),
+        CiState::Pipeline(provider, pipeline) => {
+            GitOverlay::Ci(CiView { provider: provider.clone(), pipeline: pipeline.clone(), jobs: None, cursor: 0 })
+        }
+    };
+    Some(overlay)
+}
+
 // ── Открыть окна ──────────────────────────────────────────────────────────
 
 pub fn open_menu(cwd: PathBuf, status: RepoStatus, anchor: Rect) -> GitOverlay {
@@ -638,6 +780,19 @@ pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
                 let index = choice.cursor;
                 choice.choose(index)
             }
+            _ => Command::None,
+        },
+        GitOverlay::Ci(view) => match key.code {
+            KeyCode::Esc => Command::Close,
+            KeyCode::Up => {
+                view.cursor = view.cursor.saturating_sub(1);
+                Command::Redraw
+            }
+            KeyCode::Down => {
+                view.cursor = (view.cursor + 1).min(view.job_count().saturating_sub(1));
+                Command::Redraw
+            }
+            KeyCode::Enter => view.open_job(view.cursor),
             _ => Command::None,
         },
         GitOverlay::Commit(commit) => match (key.code, &commit.focus) {
@@ -792,6 +947,12 @@ pub fn target_at(overlay: &GitOverlay, full: Rect, column: u16, row: u16) -> Opt
         GitOverlay::Choice(choice) => {
             choice.buttons(full).iter().position(|r| contains(*r, column, row)).map(GitTarget::Button)
         }
+        GitOverlay::Ci(view) => {
+            if let Some(i) = view.button_rects(full).iter().position(|r| contains(*r, column, row)) {
+                return Some(GitTarget::Button(i));
+            }
+            hit(view.job_rows(full)).map(GitTarget::Row)
+        }
         GitOverlay::Commit(commit) => {
             let (_, message, buttons) = commit.layout(full);
             if let Some(i) = buttons.iter().position(|r| contains(*r, column, row)) {
@@ -820,6 +981,10 @@ pub fn hover(overlay: &mut GitOverlay, target: GitTarget) -> bool {
             choice.cursor = i;
             true
         }
+        (GitOverlay::Ci(view), GitTarget::Row(i)) if view.cursor != i => {
+            view.cursor = i;
+            true
+        }
         _ => false,
     }
 }
@@ -838,6 +1003,8 @@ pub fn click(overlay: &mut GitOverlay, target: GitTarget) -> Command {
         (GitOverlay::Input(_), GitTarget::Button(_)) => Command::Close,
         (GitOverlay::Choice(choice), GitTarget::Button(i)) => choice.choose(i),
         (GitOverlay::Commit(commit), GitTarget::Button(i)) => commit.button(i),
+        (GitOverlay::Ci(view), GitTarget::Button(i)) => view.press(i),
+        (GitOverlay::Ci(view), GitTarget::Row(i)) => view.open_job(i),
         (GitOverlay::Commit(commit), GitTarget::Message) => {
             commit.focus = CommitFocus::Message;
             Command::Redraw
@@ -859,6 +1026,7 @@ pub fn closes_on_outside_click(overlay: &GitOverlay, full: Rect, column: u16, ro
     match overlay {
         GitOverlay::Menu(menu) => !contains(menu.rect(full), column, row),
         GitOverlay::Branch(branch) => !contains(branch.rect(full), column, row),
+        GitOverlay::Ci(view) => !contains(view.rect(full), column, row),
         _ => false,
     }
 }
@@ -884,6 +1052,55 @@ pub fn draw(frame: &mut Frame, overlay: &GitOverlay, full: Rect) {
         GitOverlay::Input(input) => draw_input(frame, input, full),
         GitOverlay::Choice(choice) => draw_choice(frame, choice, full),
         GitOverlay::Commit(commit) => draw_commit(frame, commit, full),
+        GitOverlay::Ci(view) => draw_ci(frame, view, full),
+    }
+}
+
+fn status_style(status: CiStatus) -> Style {
+    match status {
+        CiStatus::Success => Style::new().fg(Color::Green),
+        CiStatus::Failed => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        CiStatus::Running | CiStatus::Pending => Style::new().fg(Color::Yellow),
+        _ => dim(),
+    }
+}
+
+fn draw_ci(frame: &mut Frame, view: &CiView, full: Rect) {
+    let area = view.rect(full);
+    frame.render_widget(Clear, area);
+    let pipeline = &view.pipeline;
+    let title = format!(" CI · {} {} {} ", pipeline.title, pipeline.status.icon(), pipeline.status.label());
+    let block = frame_block(&title, true).title_bottom(Line::from(" Enter или клик — задача в браузере · Esc — закрыть ").centered());
+    frame.render_widget(block, area);
+    let rows = view.job_rows(full);
+    match &view.jobs {
+        None => frame.render_widget(Paragraph::new(Span::styled("  Загружаю задачи…", dim())), rows[0].0),
+        Some(Err(text)) => frame.render_widget(Paragraph::new(Span::styled(format!("  {text}"), status_style(CiStatus::Failed))), rows[0].0),
+        Some(Ok(jobs)) => {
+            for (rect, i) in rows {
+                let job = &jobs[i];
+                let selected = i == view.cursor;
+                let style = if selected { primary() } else { Style::new() };
+                let name = if job.stage.is_empty() { job.name.clone() } else { format!("{} · {}", job.stage, job.name) };
+                let line = Line::from(vec![
+                    Span::styled(format!(" {} ", job.status.icon()), if selected { style } else { status_style(job.status) }),
+                    Span::styled(name, style),
+                ]);
+                frame.render_widget(Paragraph::new(line).style(style), rect);
+                let hint = match job.seconds {
+                    Some(s) if !job.status.active() => ci::duration(s),
+                    _ => job.status.label().to_string(),
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!("{hint} "), if selected { style } else { dim() })).alignment(Alignment::Right),
+                    rect,
+                );
+            }
+        }
+    }
+    for (i, (rect, (label, _))) in view.button_rects(full).into_iter().zip(view.buttons()).enumerate() {
+        let style = if i == 0 { primary() } else { bold() };
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
     }
 }
 
