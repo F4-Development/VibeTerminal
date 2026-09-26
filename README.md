@@ -4,7 +4,15 @@
 
 ## Установка
 
-Скачай `VibeTerminal-<версия>.zip` из [последнего релиза](https://github.com/F4-Development/VibeTerminal/releases/latest), распакуй и перенеси VibeTerminal в «Программы». Нужен [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Дальше приложение обновляется само: когда выйдет новая версия, появится окно «Доступно новое обновление».
+Mac на Apple Silicon, macOS 14+ и [Claude Code](https://docs.anthropic.com/en/docs/claude-code). В Терминале:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/F4-Development/VibeTerminal/main/scripts/install.sh | bash
+```
+
+Скрипт скачает [последний релиз](https://github.com/F4-Development/VibeTerminal/releases/latest), сверит контрольную сумму и поставит VibeTerminal в «Программы». Дальше приложение обновляется само: когда выйдет новая версия, появится окно «Доступно новое обновление».
+
+Скачал архив браузером и macOS не даёт открыть — пока приложение не нотаризовано Apple, сними метку: `xattr -cr /Applications/VibeTerminal.app`.
 
 ## Из чего состоит
 
@@ -13,7 +21,7 @@
 | `src/` | `vv` — всё, что внутри окна: сессии, меню, кнопки, разрешения (Rust) |
 | `terminal/` | Приложение VibeTerminal — форк [Ghostty](https://ghostty.org) (Zig + Swift, MIT) |
 | `assets/` | Иконка и русские тексты системных окон macOS |
-| `scripts/build-app.sh` | Сборка `VibeTerminal.app` |
+| `scripts/` | Сборка (`build-app.sh`), разработка (`dev.sh`), выпуск (`release.sh`), установка (`install.sh`) |
 | `TZ.md` | Техническое задание и план по шагам |
 
 ## Сборка

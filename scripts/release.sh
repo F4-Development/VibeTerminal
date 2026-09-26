@@ -8,8 +8,9 @@
 #
 # Без файла описание — список коммитов с прошлого релиза.
 #
-# Один раз на маке: сертификат «Developer ID Application» в связке ключей и
-# доступ к нотаризации (ключ App Store Connect API):
+# С сертификатом «Developer ID Application» в связке ключей приложение
+# подписывается им и уходит Apple на нотаризацию — нужен доступ (один раз,
+# ключ App Store Connect API):
 #   xcrun notarytool store-credentials vibeterminal --key AuthKey_XXXX.p8 --key-id XXXX --issuer <uuid>
 set -euo pipefail
 
@@ -24,9 +25,14 @@ TAG="v$VERSION"
 ZIP="$ROOT/dist/VibeTerminal-$VERSION.zip"
 
 source "$ROOT/scripts/signing.sh"
-[[ -n "$SIGN_IDENTITY" ]] || { echo "нет сертификата Developer ID Application — без него macOS не откроет скачанное приложение"; exit 1; }
-xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
-    || { echo "нет доступа к нотаризации — см. начало scripts/release.sh"; exit 1; }
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
+        || { echo "нет доступа к нотаризации — см. начало scripts/release.sh"; exit 1; }
+else
+    # Без Developer ID: ставят через scripts/install.sh (curl не вешает
+    # метку «из интернета»), обновления из приложения работают как обычно.
+    echo "⚠ нет сертификата Developer ID — выпускаю без нотаризации"
+fi
 gh auth status >/dev/null 2>&1 || { echo "сначала войди в GitHub: gh auth login"; exit 1; }
 [[ -z "$(git status --porcelain)" ]] || { echo "есть незакоммиченные изменения"; exit 1; }
 git fetch --quiet origin
@@ -56,20 +62,22 @@ pack() {
     ditto -c -k --keepParent "$APP" "$ZIP"
 }
 
-echo "→ нотаризация у Apple (обычно пара минут)"
 pack
-RESULT="$(xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)"
-STATUS="$(plutil -extract status raw -o - - <<<"$RESULT")"
-if [[ "$STATUS" != "Accepted" ]]; then
-    ID="$(plutil -extract id raw -o - - <<<"$RESULT")"
-    echo "Apple не приняла приложение ($STATUS):"
-    xcrun notarytool log "$ID" --keychain-profile "$NOTARY_PROFILE"
-    exit 1
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    echo "→ нотаризация у Apple (обычно пара минут)"
+    RESULT="$(xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)"
+    STATUS="$(plutil -extract status raw -o - - <<<"$RESULT")"
+    if [[ "$STATUS" != "Accepted" ]]; then
+        ID="$(plutil -extract id raw -o - - <<<"$RESULT")"
+        echo "Apple не приняла приложение ($STATUS):"
+        xcrun notarytool log "$ID" --keychain-profile "$NOTARY_PROFILE"
+        exit 1
+    fi
+    # Билет нотаризации — внутрь приложения: открывается и без интернета.
+    xcrun stapler staple "$APP"
+    spctl --assess --type execute "$APP"
+    pack
 fi
-# Билет нотаризации — внутрь приложения: открывается и без интернета.
-xcrun stapler staple "$APP"
-spctl --assess --type execute "$APP"
-pack
 
 gh release create "$TAG" "$ZIP" --repo "$REPO" --target "$(git rev-parse HEAD)" \
     --title "VibeTerminal $VERSION" --notes-file "$NOTES"
