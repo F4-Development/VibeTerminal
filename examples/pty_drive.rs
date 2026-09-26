@@ -42,6 +42,7 @@ fn key_bytes(name: &str) -> Vec<u8> {
     match name {
         "enter" => b"\r".to_vec(),
         "esc" => b"\x1b".to_vec(),
+        "tab" => b"\t".to_vec(),
         "prefix" => b"\x1c".to_vec(),
         "up" => b"\x1b[A".to_vec(),
         "down" => b"\x1b[B".to_vec(),

@@ -29,6 +29,8 @@ use crate::picker::Picker;
 use crate::session::{self, Launch, Session, SessionId};
 use crate::settings::Settings;
 use crate::caps::Caps;
+use crate::git::{self, GitOp, OpResult, RepoStatus};
+use crate::gitui::{self, GitOverlay};
 use crate::hooks::{Decision, HookEvent, HookServer, PermissionRequest};
 use crate::ui::{self, Areas, Target, contains};
 use crate::{keys, mouse};
@@ -45,6 +47,10 @@ const FRAME: Duration = Duration::from_millis(16);
 /// Сколько ждать продолжения вывода, чтобы не рисовать кадр Claude наполовину.
 const SETTLE: Duration = Duration::from_millis(4);
 const FLASH_FOR: Duration = Duration::from_secs(5);
+/// Как часто обновлять ветку и изменения в шапке.
+const GIT_TICK: Duration = Duration::from_secs(3);
+/// Fetch при открытии сессии — не чаще этого.
+const FETCH_EVERY: Duration = Duration::from_secs(120);
 
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static POINTER_SHAPES: AtomicBool = AtomicBool::new(false);
@@ -63,6 +69,10 @@ pub enum Event {
     Exited(SessionId),
     /// Claude в сессии просит разрешение и ждёт ответа.
     Permission(SessionId, PermissionRequest),
+    /// Узнали состояние git в папке сессии.
+    GitStatus(SessionId, Option<RepoStatus>),
+    /// Закончилась команда git.
+    GitDone(SessionId, GitOp, OpResult),
     /// Хук запроса закрылся сам — Claude больше не ждёт.
     PermissionGone(SessionId, u64),
     /// Claude сообщил, что сделал: выполнил инструмент, закончил ответ…
@@ -80,6 +90,8 @@ pub enum Overlay {
     Rename(String),
     Confirm(Confirm),
     Help,
+    /// Меню веток, диалоги git, коммит.
+    Git(GitOverlay),
 }
 
 pub enum Confirm {
@@ -197,24 +209,20 @@ impl App {
                 dirty = false;
             }
             // Если висит сообщение, проснуться, чтобы его убрать.
+            // Просыпаемся дорисовать кадр, убрать сообщение или обновить git.
             let wake = match (dirty, self.flash()) {
-                (true, _) => Some(hold.unwrap_or(FRAME)),
-                (false, Some(_)) => Some(FLASH_FOR),
-                (false, None) => None,
+                (true, _) => hold.unwrap_or(FRAME),
+                (false, Some(_)) => FLASH_FOR.min(GIT_TICK),
+                (false, None) => GIT_TICK,
             };
-            let event = match wake {
-                Some(timeout) => match rx.recv_timeout(timeout) {
-                    Ok(event) => event,
-                    Err(RecvTimeoutError::Timeout) => {
-                        dirty = true;
-                        continue;
-                    }
-                    Err(RecvTimeoutError::Disconnected) => break,
-                },
-                None => match rx.recv() {
-                    Ok(event) => event,
-                    Err(_) => break,
-                },
+            let event = match rx.recv_timeout(wake) {
+                Ok(event) => event,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.refresh_git(self.selected);
+                    dirty = true;
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
             };
             dirty |= self.handle(event, terminal)?;
 
@@ -301,7 +309,21 @@ impl App {
             }
             Event::Hook(id, event) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
+                // Claude что-то поменял — пересчитать изменения в шапке.
+                self.refresh_git(index);
                 Ok(self.sessions[index].resolve_permissions(&event))
+            }
+            Event::GitStatus(id, status) => {
+                let Some(index) = self.index_of(id) else { return Ok(false) };
+                let session = &mut self.sessions[index];
+                session.git_refreshing = false;
+                let changed = session.git != status;
+                session.git = status;
+                Ok(changed && index == self.selected)
+            }
+            Event::GitDone(id, op, result) => {
+                self.on_git_done(id, op, result);
+                Ok(true)
             }
             Event::Hangup => {
                 self.quit = true;
@@ -311,6 +333,7 @@ impl App {
             Event::Term(TermEvent::Paste(text)) => {
                 match &mut self.overlay {
                     Overlay::Picker(picker) => picker.push(&text),
+                    Overlay::Git(git) => gitui::on_paste(git, &text),
                     Overlay::Rename(input) => input.push_str(text.lines().next().unwrap_or("")),
                     Overlay::None => {
                         if let Some(session) = self.current_mut() {
@@ -359,6 +382,10 @@ impl App {
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Help => self.overlay = Overlay::None,
+            Overlay::Git(git) => {
+                let command = gitui::on_key(git, key);
+                return Ok(self.apply_git(command));
+            }
             Overlay::Menu(cursor) => {
                 let items = menu::items(&self.sessions, self.selected, self.areas.sidebar.is_some());
                 match keys::latin(key.code) {
@@ -428,6 +455,7 @@ impl App {
             Action::Quit if self.sessions.is_empty() => self.quit = true,
             Action::Quit => self.overlay = Overlay::Confirm(Confirm::Quit),
             Action::Help => self.overlay = Overlay::Help,
+            Action::Git => self.open_git_menu(),
             Action::Settings => {
                 if let Err(err) = Settings::open(&self.home) {
                     self.set_flash(format!("настройки не открылись: {err}"));
@@ -495,6 +523,7 @@ impl App {
                     picker.selected = i;
                     dirty = true;
                 }
+                (Overlay::Git(git), Some(Target::Git(t))) => dirty |= gitui::hover(git, t),
                 _ => {}
             },
             MouseEventKind::Down(MouseButton::Left) => {
@@ -512,6 +541,7 @@ impl App {
                         !ui::menu_contains(full, &items, column, row)
                     }
                     Overlay::Picker(_) => !ui::picker_contains(full, column, row),
+                    Overlay::Git(git) => gitui::closes_on_outside_click(git, full, column, row),
                     _ => false,
                 };
                 if outside {
@@ -562,6 +592,13 @@ impl App {
     fn click(&mut self, target: Target) -> Result<()> {
         match target {
             Target::MenuButton => self.overlay = Overlay::Menu(self.selected),
+            Target::Branch => self.open_git_menu(),
+            Target::Git(t) => {
+                if let Overlay::Git(git) = &mut self.overlay {
+                    let command = gitui::click(git, t);
+                    self.apply_git(command);
+                }
+            }
             Target::NewSession => self.perform(Action::New)?,
             Target::Card(index) => self.select(index)?,
             Target::Bottom(action) => self.perform(action)?,
@@ -608,7 +645,7 @@ impl App {
         let area = self.areas.agent;
         let (rows, cols) = (area.height.max(1), area.width.max(1));
         let args = Settings::load(&self.home).claude_args();
-        let session = Session::spawn(id, name, dir, rows, cols, &self.launch, &args, move |chunk| {
+        let session = Session::spawn(id, name, dir, (rows, cols), &self.launch, &args, move |chunk| {
             let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
         })?;
         self.sessions.push(session);
@@ -660,7 +697,109 @@ impl App {
             self.send_focus(self.selected, false)?;
         }
         self.selected = index;
+        self.refresh_git(index);
+        self.fetch_if_stale(index);
         self.send_focus(index, true)
+    }
+
+    /// Узнать ветку и изменения в фоне; ответ придёт событием.
+    fn refresh_git(&mut self, index: usize) {
+        let Some(session) = self.sessions.get_mut(index) else { return };
+        if session.git_refreshing {
+            return;
+        }
+        session.git_refreshing = true;
+        let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let _ = tx.send(Event::GitStatus(id, git::status(&cwd)));
+        });
+    }
+
+    /// Fetch при открытии сессии и переключении на неё, но не чаще FETCH_EVERY.
+    fn fetch_if_stale(&mut self, index: usize) {
+        let Some(session) = self.sessions.get(index) else { return };
+        if session.git_busy.is_none() && session.last_fetch.is_none_or(|at| at.elapsed() > FETCH_EVERY) {
+            self.run_git(index, GitOp::Fetch { quiet: true });
+        }
+    }
+
+    /// Команда git в фоне; пока идёт, в шапке «⟳ отправляю…».
+    fn run_git(&mut self, index: usize, op: GitOp) {
+        let Some(session) = self.sessions.get_mut(index) else { return };
+        if session.git_busy.is_some() {
+            if !matches!(op, GitOp::Fetch { quiet: true }) {
+                self.set_flash("git ещё занят предыдущей командой");
+            }
+            return;
+        }
+        session.git_busy = Some(op.busy_label());
+        if matches!(op, GitOp::Fetch { .. }) {
+            session.last_fetch = Some(Instant::now());
+        }
+        let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let result = git::execute(&cwd, &op);
+            let _ = tx.send(Event::GitDone(id, op, result));
+        });
+    }
+
+    fn on_git_done(&mut self, id: SessionId, op: GitOp, result: OpResult) {
+        let Some(index) = self.index_of(id) else { return };
+        self.sessions[index].git_busy = None;
+        self.refresh_git(index);
+        let quiet = matches!(op, GitOp::Fetch { quiet: true });
+        match result {
+            Ok(message) if !quiet => self.set_flash(message),
+            Ok(_) => {}
+            Err(error) => {
+                // Не перебиваем то, что открыто сейчас, и не показываем чужие ошибки поверх другой сессии.
+                let dialog = gitui::failure_dialog(&op, &error);
+                match dialog {
+                    Some(dialog) if index == self.selected && matches!(self.overlay, Overlay::None) => {
+                        self.overlay = Overlay::Git(GitOverlay::Choice(dialog));
+                    }
+                    Some(_) => self.set_flash(format!("«{}»: git не справился", self.sessions[index].name)),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    fn open_git_menu(&mut self) {
+        let Some(session) = self.current() else { return };
+        let Some(status) = session.git.clone() else {
+            self.set_flash("В этой папке нет git-репозитория");
+            return;
+        };
+        let anchor = ui::branch_rect(self).unwrap_or(self.areas.agent_frame);
+        self.overlay = Overlay::Git(gitui::open_menu(session.cwd.clone(), status, anchor));
+    }
+
+    /// Ответ окон git: закрыть, запустить команду или поручить Claude.
+    fn apply_git(&mut self, command: gitui::Command) -> bool {
+        match command {
+            gitui::Command::None => false,
+            gitui::Command::Redraw => true,
+            gitui::Command::Close => {
+                self.overlay = Overlay::None;
+                true
+            }
+            gitui::Command::Run(op) => {
+                self.overlay = Overlay::None;
+                self.run_git(self.selected, op);
+                true
+            }
+            gitui::Command::AskClaude(text) => {
+                self.overlay = Overlay::None;
+                if let Some(session) = self.current_mut() {
+                    let sent = session.paste(&text).and_then(|()| session.write(b"\r"));
+                    if sent.is_ok() {
+                        self.set_flash("Задача отправлена Claude");
+                    }
+                }
+                true
+            }
+        }
     }
 
     fn send_focus(&mut self, index: usize, gained: bool) -> Result<()> {

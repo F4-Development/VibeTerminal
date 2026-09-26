@@ -9,6 +9,7 @@ pub enum Action {
     Rename,
     Close,
     ToggleSidebar,
+    Git,
     Settings,
     Help,
     Quit,
@@ -39,6 +40,7 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
     let sidebar_label = if sidebar_shown { "Скрыть список сессий" } else { "Показать список сессий" };
     let actions = [
         ("+", "Новая сессия", 'n', Action::New),
+        ("⎇", "Ветки и git…", 'g', Action::Git),
         ("✎", "Переименовать сессию", 'r', Action::Rename),
         ("✕", "Закрыть сессию", 'x', Action::Close),
         ("◧", sidebar_label, 'z', Action::ToggleSidebar),
@@ -47,7 +49,9 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
         ("↪", "Выйти из VibeTerminal", 'q', Action::Quit),
     ];
     let has_session = !sessions.is_empty();
-    let actions = actions.into_iter().filter(|(_, _, _, action)| has_session || !matches!(action, Action::Rename | Action::Close));
+    let actions = actions
+        .into_iter()
+        .filter(|(_, _, _, action)| has_session || !matches!(action, Action::Rename | Action::Close | Action::Git));
     for (i, (icon, label, key, action)) in actions.enumerate() {
         items.push(MenuItem { icon, label: label.to_string(), hotkey: Some(key), action, gap_before: i == 0 });
     }

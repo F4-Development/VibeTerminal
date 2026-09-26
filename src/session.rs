@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::git::RepoStatus;
 use crate::hooks::{self, Decision, HookEvent, PermissionRequest};
 
 const SCROLLBACK_LINES: usize = 10_000;
@@ -55,6 +56,12 @@ pub struct Session {
     pub cwd: PathBuf,
     /// Запросы разрешения, которые ждут ответа. Показываем последний.
     pub permissions: VecDeque<PermissionRequest>,
+    /// Git в папке сессии; `None` — не репозиторий или ещё не узнали.
+    pub git: Option<RepoStatus>,
+    /// Что git делает сейчас в фоне («отправляю»).
+    pub git_busy: Option<&'static str>,
+    pub git_refreshing: bool,
+    pub last_fetch: Option<Instant>,
     parser: vt100::Parser<Term>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -71,8 +78,7 @@ impl Session {
         id: SessionId,
         name: String,
         cwd: &Path,
-        rows: u16,
-        cols: u16,
+        (rows, cols): (u16, u16),
         launch: &Launch,
         claude_args: &[String],
         on_output: impl Fn(Option<Vec<u8>>) + Send + 'static,
@@ -143,6 +149,10 @@ impl Session {
             name,
             cwd: cwd.to_path_buf(),
             permissions: VecDeque::new(),
+            git: None,
+            git_busy: None,
+            git_refreshing: false,
+            last_fetch: None,
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
             master: pty.master,
             writer,

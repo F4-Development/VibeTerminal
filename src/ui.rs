@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::app::{App, Confirm, Overlay};
+use crate::gitui::{self, GitTarget};
 use crate::hooks::{self, Decision};
 use crate::menu::{self, Action, MenuItem};
 use crate::picker::{Picker, display_path};
@@ -80,11 +81,11 @@ pub fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
-fn width(text: &str) -> u16 {
+pub(crate) fn width(text: &str) -> u16 {
     Span::raw(text).width() as u16
 }
 
-fn centered(full: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centered(full: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(full.width.saturating_sub(2));
     let height = height.min(full.height.saturating_sub(2));
     Rect::new(full.x + (full.width - width) / 2, full.y + (full.height - height) / 2, width, height)
@@ -105,6 +106,10 @@ pub enum Target {
     DialogNo,
     /// Ответ на запрос разрешения сессии с этим номером.
     Permit(usize, Decision),
+    /// Ветка в шапке окна Claude — открывает меню git.
+    Branch,
+    /// Что-то в окнах git.
+    Git(GitTarget),
 }
 
 /// Что под мышью. Пока открыто окно, кликается только оно.
@@ -112,6 +117,7 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
     let full = app.areas.full;
     match &app.overlay {
         Overlay::Help => None,
+        Overlay::Git(git) => gitui::target_at(git, full, column, row).map(Target::Git),
         Overlay::Menu(_) => {
             let items = menu::items(&app.sessions, app.selected, app.areas.sidebar.is_some());
             menu_rows(full, &items).iter().position(|r| contains(*r, column, row)).map(Target::MenuItem)
@@ -130,6 +136,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             }
         }
         Overlay::None => {
+            if branch_rect(app).is_some_and(|r| contains(r, column, row)) {
+                return Some(Target::Branch);
+            }
             if let Some(bar) = permit_bar(app) {
                 if let Some((_, _, decision)) = bar.buttons.iter().find(|(r, _, _)| contains(*r, column, row)) {
                     return Some(Target::Permit(app.selected, *decision));
@@ -313,11 +322,11 @@ pub fn picker_contains(full: Rect, column: u16, row: u16) -> bool {
 
 // ── Отрисовка ─────────────────────────────────────────────────────────────
 
-fn dim() -> Style {
+pub(crate) fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
-fn primary() -> Style {
+pub(crate) fn primary() -> Style {
     Style::new().fg(Color::Indexed(16)).bg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
@@ -325,15 +334,15 @@ fn hovered(app: &App, target: Target) -> bool {
     app.hover == Some(target)
 }
 
-fn bold() -> Style {
+pub(crate) fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
 
-fn accent() -> Style {
+pub(crate) fn accent() -> Style {
     Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
-fn frame_block(title: &str, focused: bool) -> Block<'_> {
+pub(crate) fn frame_block(title: &str, focused: bool) -> Block<'_> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if focused { ACCENT } else { BORDER }))
@@ -398,6 +407,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_dialog(frame, app, title, vec![Line::raw(text)]);
         }
         Overlay::Help => draw_help(frame, full),
+        Overlay::Git(git) => gitui::draw(frame, git, full),
     }
 }
 
@@ -467,17 +477,67 @@ fn draw_agent(frame: &mut Frame, app: &App) {
         return;
     };
     let path = display_path(&session.cwd, &app.home);
-    let title = Line::from(vec![
-        Span::styled(format!(" {} ", session.name), Style::new().add_modifier(Modifier::BOLD)),
-        Span::styled(format!("· {path} "), dim()),
-    ]);
-    let mut block = frame_block("", matches!(app.overlay, Overlay::None)).title(title);
+    let mut block = frame_block("", matches!(app.overlay, Overlay::None));
     let detail = session_detail(session, &app.home);
     if app.areas.sidebar.is_none() && detail != path {
         block = block.title(Line::from(Span::styled(format!(" {detail} "), dim())).right_aligned());
     }
-    frame.render_widget(block, app.areas.agent_frame);
+    let area = app.areas.agent_frame;
+    frame.render_widget(block, area);
+    // Шапка поверх верхней рамки: папка, ветка, изменения, путь.
+    if let Some(header) = header(app) {
+        let line = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
+        frame.render_widget(Paragraph::new(header.line), line);
+    }
     view::render(session.screen(), app.areas.agent, frame.buffer_mut(), app.caps.truecolor);
+}
+
+/// Шапка окна Claude и где в ней ветка (по ней кликают).
+struct Header {
+    line: Line<'static>,
+    branch: Option<Rect>,
+}
+
+fn header(app: &App) -> Option<Header> {
+    let session = app.current()?;
+    let area = app.areas.agent_frame;
+    let folder = session.cwd.file_name().map_or_else(|| session.cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let folder = format!(" {folder} ");
+    let x = area.x + 1 + width(&folder);
+    let mut spans = vec![Span::styled(folder, bold())];
+    let mut branch = None;
+    if let Some(git) = &session.git {
+        let label = format!("⎇ {}", git.head_label());
+        let open = matches!(app.overlay, Overlay::Git(_));
+        let style = if open || app.hover == Some(Target::Branch) { primary() } else { accent() };
+        branch = Some(Rect::new(x, area.y, width(&label), 1));
+        spans.push(Span::styled(label, style));
+        if git.ahead > 0 {
+            spans.push(Span::styled(format!(" ↑{}", git.ahead), Style::new().fg(Color::Green)));
+        }
+        if git.behind > 0 {
+            spans.push(Span::styled(format!(" ↓{}", git.behind), Style::new().fg(Color::Cyan)));
+        }
+        let alarm = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+        if git.conflicts > 0 {
+            spans.push(Span::styled(format!(" ⚠ конфликтов: {}", git.conflicts), alarm));
+        } else if let Some(operation) = git.operation {
+            spans.push(Span::styled(format!(" ⚠ незаконченное {}", operation.label()), alarm));
+        } else if git.changed > 0 {
+            spans.push(Span::styled(format!(" ● {} изм.", git.changed), Style::new().fg(Color::Yellow)));
+        }
+        if let Some(busy) = session.git_busy {
+            spans.push(Span::styled(format!(" ⟳ {busy}…"), dim()));
+        }
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(format!("· {} ", display_path(&session.cwd, &app.home)), dim()));
+    Some(Header { line: Line::from(spans), branch })
+}
+
+/// Где в шапке ветка — под ней открывается меню git.
+pub fn branch_rect(app: &App) -> Option<Rect> {
+    header(app)?.branch
 }
 
 /// Нет ни одной сессии: приглашение выбрать проект.

@@ -1,4 +1,6 @@
 mod app;
+mod git;
+mod gitui;
 mod caps;
 mod hooks;
 mod keys;
