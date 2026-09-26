@@ -124,6 +124,36 @@ pub struct Pipeline {
     pub url: String,
     /// «#1842» или название workflow.
     pub title: String,
+    /// Коммит, на котором запущен.
+    pub sha: String,
+    /// Задачи, которые сейчас важны: идут, упали или ждут.
+    pub current: Vec<String>,
+}
+
+impl Pipeline {
+    /// «CI: test идёт», «CI: test, lint упали», «CI: build и ещё 3 ждут».
+    pub fn summary(&self) -> String {
+        let (one, many) = match self.status {
+            CiStatus::Running => ("идёт", "идут"),
+            CiStatus::Failed => ("упал", "упали"),
+            CiStatus::Pending => ("ждёт", "ждут"),
+            status => return format!("CI {}", status.label()),
+        };
+        match self.current.as_slice() {
+            [] => format!("CI {one}"),
+            [job] => format!("CI: {} {one}", short_name(job)),
+            [a, b] => format!("CI: {}, {} {many}", short_name(a), short_name(b)),
+            [first, rest @ ..] => format!("CI: {} и ещё {} {many}", short_name(first), rest.len()),
+        }
+    }
+}
+
+fn short_name(name: &str) -> String {
+    const MAX: usize = 24;
+    match name.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}…", &name[..cut]),
+        None => name.to_string(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -189,11 +219,13 @@ pub fn state(cwd: &Path, branch: &str) -> CiState {
                     status: CiStatus::from_gitlab(p["status"].as_str().unwrap_or_default()),
                     url: p["web_url"].as_str().unwrap_or_default().to_string(),
                     title: format!("#{}", id_of(&p["iid"]).trim_matches('"')),
+                    sha: p["sha"].as_str().unwrap_or_default().to_string(),
+                    current: Vec::new(),
                 })
             })
         }
         Provider::GitHub { .. } => {
-            let fields = "databaseId,status,conclusion,url,displayTitle,workflowName";
+            let fields = "databaseId,status,conclusion,url,displayTitle,workflowName,headSha";
             json(cwd, &provider, &["run", "list", "--branch", branch, "--limit", "1", "--json", fields]).map(|v| {
                 v.as_array().and_then(|list| list.first()).map(|r| Pipeline {
                     id: id_of(&r["databaseId"]),
@@ -203,18 +235,34 @@ pub fn state(cwd: &Path, branch: &str) -> CiState {
                     ),
                     url: r["url"].as_str().unwrap_or_default().to_string(),
                     title: r["workflowName"].as_str().unwrap_or_default().to_string(),
+                    sha: r["headSha"].as_str().unwrap_or_default().to_string(),
+                    current: Vec::new(),
                 })
             })
         }
     };
     match result {
-        Ok(Some(pipeline)) => CiState::Pipeline(provider, pipeline),
+        Ok(Some(mut pipeline)) => {
+            pipeline.current = current_jobs(cwd, &provider, &pipeline);
+            CiState::Pipeline(provider, pipeline)
+        }
         Ok(None) => CiState::NoPipeline(provider),
         Err(CliError::Login) => CiState::NeedLogin(provider),
         // Закрытый проект без входа GitLab показывает как «не найден».
         Err(CliError::Other(_)) if !logged_in(cwd, &provider) => CiState::NeedLogin(provider),
         Err(CliError::Other(text)) => CiState::Error(provider, text),
     }
+}
+
+/// Какие задачи назвать в шапке: те, что идут, упали или ждут — смотря
+/// в каком состоянии весь пайплайн. Не узнали — без имён.
+fn current_jobs(cwd: &Path, provider: &Provider, pipeline: &Pipeline) -> Vec<String> {
+    let wanted = match pipeline.status {
+        CiStatus::Running | CiStatus::Failed | CiStatus::Pending => pipeline.status,
+        _ => return Vec::new(),
+    };
+    let jobs = jobs(cwd, provider, pipeline).unwrap_or_default();
+    jobs.into_iter().filter(|job| job.status == wanted).map(|job| job.name).collect()
 }
 
 /// Есть ли вход на этот сервер.
@@ -438,6 +486,24 @@ mod tests {
         assert_eq!(remote_host("git@gitlab.example.org:team/app.git").as_deref(), Some("gitlab.example.org"));
         assert_eq!(remote_host("ssh://git@gitlab.example.com:2222/x/y.git").as_deref(), Some("gitlab.example.com"));
         assert_eq!(remote_host("https://github.com/me/repo").as_deref(), Some("github.com"));
+    }
+
+    #[test]
+    fn names_current_jobs() {
+        let pipeline = |status, current: &[&str]| Pipeline {
+            id: "1".into(),
+            status,
+            url: String::new(),
+            title: String::new(),
+            sha: String::new(),
+            current: current.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(pipeline(CiStatus::Running, &["test"]).summary(), "CI: test идёт");
+        assert_eq!(pipeline(CiStatus::Failed, &["test", "lint"]).summary(), "CI: test, lint упали");
+        assert_eq!(pipeline(CiStatus::Pending, &["a", "b", "c", "d"]).summary(), "CI: a и ещё 3 ждут");
+        assert_eq!(pipeline(CiStatus::Failed, &[]).summary(), "CI упал");
+        assert_eq!(pipeline(CiStatus::Success, &[]).summary(), "CI прошёл");
+        assert_eq!(pipeline(CiStatus::Running, &["build:docker-image:production-eu"]).summary(), "CI: build:docker-image:produ… идёт");
     }
 
     #[test]

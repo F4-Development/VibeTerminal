@@ -587,11 +587,14 @@ fn draw_agent(frame: &mut Frame, app: &App) {
     let area = app.areas.agent_frame;
     frame.render_widget(block, area);
     // Шапка поверх верхней рамки: папка, ветка, изменения, путь; справа CI.
+    // Длинная шапка обрезается перед значком CI, а не прячется под ним.
+    let badge = ci_badge(app);
     if let Some(header) = header(app) {
-        let line = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
+        let right = badge.as_ref().map_or(area.right().saturating_sub(1), |(_, _, rect)| rect.x.saturating_sub(1));
+        let line = Rect::new(area.x + 1, area.y, right.saturating_sub(area.x + 1), 1);
         frame.render_widget(Paragraph::new(header.line), line);
     }
-    if let Some((label, style, rect)) = ci_badge(app) {
+    if let Some((label, style, rect)) = badge {
         let style = if app.hover == Some(Target::Ci) { primary() } else { style };
         frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
     }
@@ -646,8 +649,13 @@ fn header(app: &App) -> Option<Header> {
 /// Значок CI справа в шапке: текст, цвет и где он.
 fn ci_badge(app: &App) -> Option<(String, Style, Rect)> {
     use crate::ci::CiState;
-    let state = app.current()?.ci.as_ref()?;
+    let session = app.current()?;
+    let state = session.ci.as_ref()?;
     let (label, style) = match state {
+        // Только что отправили — пайплайн на этот коммит ещё не создан.
+        CiState::Pipeline(..) | CiState::NoPipeline(_) if session.ci_expect.is_some() => {
+            (" ◌ CI: ждём запуска ".to_string(), Style::new().fg(Color::Yellow))
+        }
         CiState::Unsupported => return None,
         CiState::NeedCli(p) => (format!(" CI: нужен {} ", p.cli()), dim()),
         CiState::NeedLogin(p) => (format!(" Войти в {} ", p.name()), accent()),
@@ -660,7 +668,7 @@ fn ci_badge(app: &App) -> Option<(String, Style, Rect)> {
                 crate::ci::CiStatus::Running | crate::ci::CiStatus::Pending => Style::new().fg(Color::Yellow),
                 _ => dim(),
             };
-            (format!(" {} CI {} ", pipeline.status.icon(), pipeline.status.label()), style)
+            (format!(" {} {} ", pipeline.status.icon(), pipeline.summary()), style)
         }
     };
     let area = app.areas.agent_frame;

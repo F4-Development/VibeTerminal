@@ -79,6 +79,8 @@ pub struct Session {
     pub ci_refreshing: bool,
     /// Когда проверить CI снова; `None` — при первой возможности.
     pub ci_due: Option<Instant>,
+    /// Ветку только что отправили: ждём пайплайн на этот коммит (и с каких пор).
+    pub ci_expect: Option<(String, Instant)>,
     /// Сессия-команда (вход, установка), а не Claude.
     pub is_command: bool,
     /// Работает, готово, прервали — по событиям Claude.
@@ -191,6 +193,7 @@ impl Session {
             ci: None,
             ci_refreshing: false,
             ci_due: None,
+            ci_expect: None,
             is_command: matches!(program, Program::Command(_)),
             status: Status::default(),
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),

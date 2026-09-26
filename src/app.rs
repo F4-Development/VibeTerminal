@@ -56,6 +56,10 @@ const GIT_TICK: Duration = Duration::from_secs(3);
 const STATUS_TICK: Duration = Duration::from_secs(1);
 /// Fetch при открытии сессии — не чаще этого.
 const FETCH_EVERY: Duration = Duration::from_secs(120);
+/// После отправки ветки ждём пайплайн на новый коммит не дольше этого…
+const CI_EXPECT_FOR: Duration = Duration::from_secs(120);
+/// …и проверяем так часто.
+const CI_EXPECT_POLL: Duration = Duration::from_secs(5);
 
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static POINTER_SHAPES: AtomicBool = AtomicBool::new(false);
@@ -376,6 +380,16 @@ impl App {
                 if branch(&session.git) != branch(&status) {
                     session.ci = None;
                     session.ci_due = None;
+                    session.ci_expect = None;
+                } else if let (Some(old), Some(new)) = (&session.git, &status)
+                    && new.upstream_head.is_some()
+                    && old.upstream_head != new.upstream_head
+                {
+                    // Ветка на сервере сдвинулась — неважно, кто отправил:
+                    // ты, Claude или другой терминал. CI сейчас запустится.
+                    let sha = new.upstream_head.clone().unwrap_or_default();
+                    session.ci_expect = Some((sha, Instant::now()));
+                    session.ci_due = None;
                 }
                 session.git = status;
                 self.refresh_ci_if_due(index);
@@ -393,7 +407,17 @@ impl App {
                 if session.git.as_ref().and_then(|g| g.branch.as_deref()) != Some(branch.as_str()) {
                     return Ok(false);
                 }
+                // Ждали пайплайн на отправленный коммит: появился, не дождались
+                // за 2 минуты или CI вообще недоступен — больше не ждём.
+                if let Some((sha, since)) = &session.ci_expect {
+                    let started = matches!(&state, CiState::Pipeline(_, p) if p.sha == *sha);
+                    let reachable = matches!(state, CiState::Pipeline(..) | CiState::NoPipeline(_));
+                    if started || !reachable || since.elapsed() >= CI_EXPECT_FOR {
+                        session.ci_expect = None;
+                    }
+                }
                 let wait = match &state {
+                    _ if session.ci_expect.is_some() => CI_EXPECT_POLL,
                     CiState::Pipeline(_, p) if p.status.active() => Duration::from_secs(15),
                     CiState::Pipeline(..) | CiState::NoPipeline(_) => Duration::from_secs(120),
                     CiState::Unsupported => Duration::from_secs(3600),

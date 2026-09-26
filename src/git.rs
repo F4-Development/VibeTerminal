@@ -13,6 +13,9 @@ pub struct RepoStatus {
     pub branch: Option<String>,
     pub head: String,
     pub upstream: Option<String>,
+    /// Коммит ветки на сервере (`@{upstream}`). Сдвинулся — кто-то
+    /// отправил изменения (ты, Claude, другой терминал) или пришли чужие.
+    pub upstream_head: Option<String>,
     pub ahead: u32,
     pub behind: u32,
     /// Изменённые и новые файлы.
@@ -110,6 +113,9 @@ pub fn status(cwd: &Path) -> Option<RepoStatus> {
     }
     let mut status = parse_status(&output.stdout);
     status.operation = operation(cwd);
+    if status.upstream.is_some() {
+        status.upstream_head = run(cwd, &["rev-parse", "--verify", "-q", "@{upstream}"]).ok().map(|sha| sha.trim().to_string());
+    }
     Some(status)
 }
 
