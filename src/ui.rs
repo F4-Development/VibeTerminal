@@ -715,7 +715,7 @@ pub struct UsageRow {
 
 pub fn usage_rows(app: &App) -> Vec<UsageRow> {
     let session = app.current();
-    let line = session.and_then(|s| s.status_line);
+    let line = session.and_then(|s| s.status_line.as_ref());
     let context = line.and_then(|l| l.context);
     let detail = match (session, context, line.and_then(|l| l.context_size)) {
         (None, ..) => "нет открытой сессии".to_string(),

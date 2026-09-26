@@ -26,6 +26,7 @@ use signal_hook::iterator::Signals;
 
 use crate::menu::{self, Action};
 use crate::picker::Picker;
+use crate::saved::{self, SavedSession, SavedWindow};
 use crate::session::{self, Launch, Program, Session, SessionId};
 use crate::notify::{self, Notifier};
 use crate::status::{self, State};
@@ -215,9 +216,14 @@ pub fn run() -> Result<()> {
         quit: false,
     };
 
-    // Из Dock приложение стартует в домашней папке — там Claude не нужен,
-    // встречаем выбором проекта. Из терминала в папке проекта — сразу Claude.
-    let started = if cwd == app.home || cwd == Path::new("/") {
+    // Из Dock приложение стартует в домашней папке: возвращаем сессии,
+    // что были открыты до перезапуска, а нет таких — выбор проекта.
+    // Из терминала в папке проекта — сразу Claude там.
+    let from_dock = cwd == app.home || cwd == Path::new("/");
+    let restored = from_dock && saved::claim(&app.home).is_some_and(|window| app.restore(window));
+    let started = if restored {
+        Ok(())
+    } else if from_dock {
         app.overlay = Overlay::Picker(Picker::new(&app.home));
         Ok(())
     } else {
@@ -227,6 +233,8 @@ pub fn run() -> Result<()> {
         spawn_input_thread(tx);
         app.run_loop(&mut terminal, &rx)
     });
+    // Запомнить, что было открыто, — после перезапуска сессии вернутся.
+    app.save_state();
     // Что бы ни случилось, Claude не должны пережить окно vv.
     app.stop_everything();
     restore_terminal();
@@ -382,6 +390,9 @@ impl App {
                 if event.name == "Stop" {
                     self.refresh_usage(USAGE_AFTER_TURN);
                 }
+                if self.sessions[index].note_dialog(&event.claude_id, &event.transcript) {
+                    self.save_state();
+                }
                 let session = &mut self.sessions[index];
                 let before = session.status.state;
                 let worked = session.status.since.elapsed();
@@ -401,13 +412,17 @@ impl App {
             }
             Event::StatusLine(id, line) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
-                let changed = self.sessions[index].status_line != Some(line);
+                if self.sessions[index].note_dialog(&line.claude_id, &line.transcript) {
+                    self.save_state();
+                }
+                let (five_hour, seven_day) = (line.five_hour, line.seven_day);
+                let changed = self.sessions[index].status_line.as_ref() != Some(&line);
                 self.sessions[index].status_line = Some(line);
                 let mut limits = false;
-                if let Some(percent) = line.five_hour {
+                if let Some(percent) = five_hour {
                     limits |= usage::set_live(&mut self.usage, "session", percent);
                 }
-                if let Some(percent) = line.seven_day {
+                if let Some(percent) = seven_day {
                     limits |= usage::set_live(&mut self.usage, "week", percent);
                 }
                 Ok(limits || (changed && index == self.selected))
@@ -722,6 +737,7 @@ impl App {
                     if let Some(session) = self.current_mut() {
                         session.name = unique;
                     }
+                    self.save_state();
                 }
             }
             Overlay::Confirm(Confirm::Close) => self.close_current(),
@@ -898,6 +914,56 @@ impl App {
         self.spawn_session(folder, dir, Program::Claude(args))
     }
 
+    /// Вернуть сессии, открытые до перезапуска: диалоги Claude продолжаются
+    /// с той же историей. `false` — ни одну открыть не вышло.
+    fn restore(&mut self, window: SavedWindow) -> bool {
+        let args = Settings::load(&self.home).claude_args();
+        for saved in window.sessions.iter().filter(|s| s.cwd.is_dir()) {
+            let mut args = args.clone();
+            if let Some(id) = saved.resumable() {
+                args.extend(["--resume".to_string(), id.to_string()]);
+            }
+            if self.spawn_session(saved.name.clone(), &saved.cwd, Program::Claude(args)).is_ok()
+                && let Some(session) = self.sessions.last_mut()
+            {
+                session.claude_id.clone_from(&saved.claude_id);
+                session.transcript.clone_from(&saved.transcript);
+            }
+        }
+        if self.sessions.is_empty() {
+            return false;
+        }
+        let selected = window.selected.min(self.sessions.len() - 1);
+        let _ = self.select(selected);
+        let note = match self.sessions.len() {
+            1 => "Сессия вернулась после перезапуска".to_string(),
+            n => format!("Вернул сессии после перезапуска: {n}"),
+        };
+        self.set_flash(note);
+        self.save_state();
+        true
+    }
+
+    /// Запомнить открытые сессии этого окна. Сессии-команды (вход, установка)
+    /// не запоминаем.
+    fn save_state(&self) {
+        let claude: Vec<(usize, &Session)> = self.sessions.iter().enumerate().filter(|(_, s)| !s.is_command).collect();
+        let selected = claude.iter().position(|(i, _)| *i == self.selected).unwrap_or(0);
+        let window = SavedWindow {
+            sessions: claude
+                .iter()
+                .map(|(_, s)| SavedSession {
+                    name: s.name.clone(),
+                    cwd: s.cwd.clone(),
+                    claude_id: s.claude_id.clone(),
+                    transcript: s.transcript.clone(),
+                })
+                .collect(),
+            selected,
+        };
+        let _ = saved::save(&self.home, &window);
+    }
+
     fn spawn_session(&mut self, name: String, dir: &Path, program: Program) -> Result<()> {
         let name = self.unique_name(&name);
         let id = self.next_id;
@@ -950,6 +1016,8 @@ impl App {
     }
 
     fn after_removal(&mut self) {
+        // Закрытую сессию после перезапуска не возвращаем.
+        self.save_state();
         // Закрылась последняя — снова выбор проекта, окно не закрываем.
         if self.sessions.is_empty() {
             self.selected = 0;
@@ -965,6 +1033,7 @@ impl App {
             self.send_focus(self.selected, false)?;
         }
         self.selected = index;
+        self.save_state();
         self.mark_seen();
         self.refresh_git(index);
         self.fetch_if_stale(index);

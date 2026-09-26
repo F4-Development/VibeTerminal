@@ -108,6 +108,9 @@ pub struct HookEvent {
     /// Когда запустился хук, мс от начала эпохи. Хуки асинхронные и
     /// приходят не по порядку — по этому времени старые пропускаем.
     pub at: u64,
+    /// Диалог Claude и его файл — чтобы продолжить после перезапуска.
+    pub claude_id: String,
+    pub transcript: String,
 }
 
 /// Настройки для `claude --settings`: наши хуки только для этой сессии,
@@ -137,7 +140,7 @@ fn shell_quote(text: &str) -> String {
 }
 
 /// Что Claude показал бы в строке состояния: заполнение контекста и лимиты.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusLine {
     /// Контекст чата занят на столько процентов…
     pub context: Option<f64>,
@@ -146,6 +149,9 @@ pub struct StatusLine {
     /// Лимит 5 часов и недельный, проценты.
     pub five_hour: Option<f64>,
     pub seven_day: Option<f64>,
+    /// Диалог Claude и его файл.
+    pub claude_id: String,
+    pub transcript: String,
 }
 
 impl StatusLine {
@@ -157,6 +163,8 @@ impl StatusLine {
             context_size: window["context_window_size"].as_u64(),
             five_hour: limits["five_hour"]["used_percentage"].as_f64(),
             seven_day: limits["seven_day"]["used_percentage"].as_f64(),
+            claude_id: payload["session_id"].as_str().unwrap_or_default().to_string(),
+            transcript: payload["transcript_path"].as_str().unwrap_or_default().to_string(),
         }
     }
 }
@@ -222,6 +230,8 @@ fn serve(stream: UnixStream, tx: Sender<Event>) {
                 message: text("last_assistant_message"),
                 error: text("error"),
                 at: message["at"].as_u64().unwrap_or_else(status::now_ms),
+                claude_id: text("session_id"),
+                transcript: text("transcript_path"),
             };
             let _ = tx.send(Event::Hook(session as SessionId, event));
             return;

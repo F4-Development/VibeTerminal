@@ -87,6 +87,9 @@ pub struct Session {
     pub status: Status,
     /// Заполнение контекста и лимиты из строки состояния Claude.
     pub status_line: Option<StatusLine>,
+    /// Диалог Claude и его файл — по ним сессия продолжится после перезапуска.
+    pub claude_id: Option<String>,
+    pub transcript: Option<PathBuf>,
     parser: vt100::Parser<Term>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -199,6 +202,8 @@ impl Session {
             is_command: matches!(program, Program::Command(_)),
             status: Status::default(),
             status_line: None,
+            claude_id: None,
+            transcript: None,
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
             master: pty.master,
             writer,
@@ -238,6 +243,16 @@ impl Session {
     pub fn frame_hold(&self) -> Option<Duration> {
         let left = SYNC_UPDATE_MAX.checked_sub(self.sync_since?.elapsed())?;
         (!left.is_zero()).then_some(left)
+    }
+
+    /// Claude сообщил свой диалог (он меняется после `/clear`). `true` — новый.
+    pub fn note_dialog(&mut self, id: &str, transcript: &str) -> bool {
+        if id.is_empty() || self.claude_id.as_deref() == Some(id) {
+            return false;
+        }
+        self.claude_id = Some(id.to_string());
+        self.transcript = (!transcript.is_empty()).then(|| PathBuf::from(transcript));
+        true
     }
 
     /// На карточке идут секунды — перерисовывать почаще.
