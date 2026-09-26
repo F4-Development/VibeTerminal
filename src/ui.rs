@@ -608,10 +608,13 @@ pub fn waiting_button(app: &App) -> Option<(Rect, String)> {
 
 // ── Подпись F4 Studio ────────────────────────────────────────────────────
 
-/// Фирменный синий F4 Studio.
-const F4_BLUE: (u8, u8, u8) = (0x14, 0x47, 0xE6);
+/// Фирменный синий F4 Studio #1447E6, осветлённый для тёмного фона: чистый
+/// на чёрном выглядит кислотно.
+const F4_BLUE: (u8, u8, u8) = (0x6A, 0x88, 0xE8);
 pub const F4_SITE: &str = "https://f4studio.com";
-const CREDIT: [&str; 4] = ["Made with ", "♥", " by ", "F4 Studio"];
+/// Сердце — с селектором текстового начертания (VS15): иначе терминал рисует
+/// его цветным эмодзи в две клетки, и оно наезжает на пробел после себя.
+const CREDIT: [&str; 4] = ["Made with ", "♥\u{FE0E}", " by ", "F4 Studio"];
 
 /// Справа в нижней строке. Мало места — не показываем: кнопки важнее.
 pub fn credit_rect(app: &App) -> Option<Rect> {
@@ -625,7 +628,7 @@ pub fn credit_rect(app: &App) -> Option<Rect> {
 fn draw_credit(frame: &mut Frame, app: &App) {
     let Some(rect) = credit_rect(app) else { return };
     let (r, g, b) = F4_BLUE;
-    let mut studio = Style::new().fg(view::rgb(r, g, b, app.caps.truecolor)).add_modifier(Modifier::BOLD);
+    let mut studio = Style::new().fg(view::rgb(r, g, b, app.caps.truecolor));
     if hovered(app, Target::Credit) {
         studio = studio.add_modifier(Modifier::UNDERLINED);
     }
