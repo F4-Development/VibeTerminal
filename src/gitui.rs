@@ -3,6 +3,7 @@
 //! для кликов и отрисовка; vv исполняет то, что они вернут (`Command`).
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -567,7 +568,13 @@ pub struct CiView {
     /// `None` — ещё грузятся.
     pub jobs: Option<Result<Vec<Job>, String>>,
     cursor: usize,
+    /// Когда загрузить задачи снова; `None` — всё закончилось, больше не надо.
+    pub due: Option<Instant>,
+    pub loading: bool,
 }
+
+/// Пока пайплайн идёт, задачи в открытом окне обновляются так часто.
+const CI_VIEW_POLL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 enum CiButton {
@@ -578,6 +585,38 @@ enum CiButton {
 }
 
 impl CiView {
+    /// Пришёл свежий статус CI: тот же пайплайн — обновить и перечитать
+    /// задачи, новый (после push) — показать его.
+    pub fn update_pipeline(&mut self, pipeline: &Pipeline) {
+        if self.pipeline.id != pipeline.id {
+            self.jobs = None;
+            self.cursor = 0;
+            self.due = Some(Instant::now());
+        } else if self.pipeline.status != pipeline.status {
+            self.due = Some(Instant::now());
+        }
+        self.pipeline = pipeline.clone();
+    }
+
+    /// Задачи загрузились. `true` — все закончились, а пайплайн ещё числится
+    /// идущим: пора узнать его итог.
+    pub fn jobs_loaded(&mut self, jobs: Result<Vec<Job>, String>) -> bool {
+        self.loading = false;
+        let running = jobs.as_ref().is_ok_and(|jobs| jobs.iter().any(|job| job.status.active()));
+        if let Ok(list) = &jobs {
+            self.cursor = self.cursor.min(list.len().saturating_sub(1));
+        }
+        self.jobs = Some(jobs);
+        let active = running || self.pipeline.status.active();
+        self.due = active.then(|| Instant::now() + CI_VIEW_POLL);
+        !running && self.pipeline.status.active()
+    }
+
+    /// Пора загрузить задачи.
+    pub fn wants_jobs(&self) -> bool {
+        !self.loading && self.due.is_some_and(|due| Instant::now() >= due)
+    }
+
     fn buttons(&self) -> Vec<(&'static str, CiButton)> {
         let mut buttons = Vec::new();
         if self.pipeline.status == CiStatus::Failed {
@@ -684,7 +723,14 @@ pub fn open_ci(state: &CiState) -> Option<GitOverlay> {
             vec![("ОК", ChoiceAction::Close)],
         )),
         CiState::Pipeline(provider, pipeline) => {
-            GitOverlay::Ci(CiView { provider: provider.clone(), pipeline: pipeline.clone(), jobs: None, cursor: 0 })
+            GitOverlay::Ci(CiView {
+                provider: provider.clone(),
+                pipeline: pipeline.clone(),
+                jobs: None,
+                cursor: 0,
+                due: Some(Instant::now()),
+                loading: false,
+            })
         }
     };
     Some(overlay)
@@ -1295,4 +1341,66 @@ mod tests {
         assert_eq!(labels, ["Слить (merge)", "Перебазировать (rebase)", "Отмена"]);
         assert!(failure_dialog(&GitOp::Fetch { quiet: true }, &error).is_none());
     }
+
+    fn ci_view(status: CiStatus) -> CiView {
+        let pipeline = Pipeline {
+            id: "20".into(),
+            status,
+            url: String::new(),
+            title: "#20".into(),
+            sha: "abc".into(),
+            current: Vec::new(),
+        };
+        CiView {
+            provider: Provider::GitLab { host: "gitlab.com".into() },
+            pipeline,
+            jobs: None,
+            cursor: 0,
+            due: Some(Instant::now()),
+            loading: false,
+        }
+    }
+
+    fn job(name: &str, status: CiStatus) -> Job {
+        Job { id: name.into(), name: name.into(), stage: String::new(), status, seconds: None, url: String::new() }
+    }
+
+    #[test]
+    fn ci_view_refreshes_while_pipeline_runs() {
+        let mut view = ci_view(CiStatus::Running);
+        assert!(view.wants_jobs(), "при открытии задачи грузятся сразу");
+        view.loading = true;
+        assert!(!view.wants_jobs(), "пока грузятся — второй раз не просим");
+
+        // Идёт deploy — перечитываем через несколько секунд.
+        assert!(!view.jobs_loaded(Ok(vec![job("test", CiStatus::Success), job("deploy", CiStatus::Running)])));
+        assert!(view.due.is_some() && !view.wants_jobs());
+
+        // Все задачи закончились, а пайплайн ещё «идёт» — пора узнать итог.
+        view.loading = true;
+        assert!(view.jobs_loaded(Ok(vec![job("test", CiStatus::Success), job("deploy", CiStatus::Success)])));
+
+        // Итог пришёл — задачи перечитываются в последний раз и опрос кончается.
+        let mut done = view.pipeline.clone();
+        done.status = CiStatus::Success;
+        view.update_pipeline(&done);
+        assert!(view.wants_jobs());
+        view.loading = true;
+        assert!(!view.jobs_loaded(Ok(vec![job("test", CiStatus::Success), job("deploy", CiStatus::Success)])));
+        assert_eq!(view.due, None);
+    }
+
+    #[test]
+    fn ci_view_switches_to_new_pipeline() {
+        let mut view = ci_view(CiStatus::Success);
+        view.jobs_loaded(Ok(vec![job("test", CiStatus::Success)]));
+        assert_eq!(view.due, None);
+        let mut next = view.pipeline.clone();
+        next.id = "21".into();
+        next.status = CiStatus::Pending;
+        view.update_pipeline(&next);
+        assert_eq!(view.pipeline.id, "21");
+        assert!(view.jobs.is_none() && view.wants_jobs(), "новый пайплайн после push показывается сразу");
+    }
+
 }

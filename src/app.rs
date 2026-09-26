@@ -232,6 +232,14 @@ impl App {
             for session in &mut self.sessions {
                 dirty |= session.status.settle();
             }
+            // Git и CI открытой сессии — по часам, даже когда Claude без
+            // остановки что-то выводит и таймаута ожидания не бывает.
+            if self.last_git_tick.elapsed() >= GIT_TICK {
+                self.last_git_tick = Instant::now();
+                self.refresh_git(self.selected);
+                self.refresh_ci_if_due(self.selected);
+            }
+            self.refresh_ci_view();
             let banner_due = self.notifier.flush(terminal.backend_mut())?;
             let hold = self.current().and_then(Session::frame_hold);
             if dirty && hold.is_none() {
@@ -250,11 +258,6 @@ impl App {
             let event = match rx.recv_timeout(wake) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
-                    if self.last_git_tick.elapsed() >= GIT_TICK {
-                        self.last_git_tick = Instant::now();
-                        self.refresh_git(self.selected);
-                        self.refresh_ci_if_due(self.selected);
-                    }
                     dirty = true;
                     continue;
                 }
@@ -425,6 +428,13 @@ impl App {
                 };
                 session.ci_due = Some(Instant::now() + wait);
                 let changed = session.ci.as_ref() != Some(&state);
+                // Окно CI открыто — в нём тот же статус и, если был push, новый пайплайн.
+                if index == self.selected
+                    && let CiState::Pipeline(_, pipeline) = &state
+                    && let Overlay::Git(GitOverlay::Ci(view)) = &mut self.overlay
+                {
+                    view.update_pipeline(pipeline);
+                }
                 session.ci = Some(state);
                 Ok(changed && index == self.selected)
             }
@@ -433,7 +443,12 @@ impl App {
                     && self.sessions.get(self.selected).is_some_and(|s| s.id == id)
                     && view.pipeline.id == pipeline
                 {
-                    view.jobs = Some(jobs);
+                    // Задачи закончились — узнать итог пайплайна, не дожидаясь очереди.
+                    if view.jobs_loaded(jobs)
+                        && let Some(session) = self.sessions.get_mut(self.selected)
+                    {
+                        session.ci_due = None;
+                    }
                     return Ok(true);
                 }
                 Ok(false)
@@ -992,15 +1007,25 @@ impl App {
         let Some(session) = self.current() else { return };
         let Some(state) = session.ci.clone() else { return };
         let Some(overlay) = gitui::open_ci(&state) else { return };
-        if let (GitOverlay::Ci(view), Some(session)) = (&overlay, self.current()) {
-            let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
-            let (provider, pipeline) = (view.provider.clone(), view.pipeline.clone());
-            thread::spawn(move || {
-                let jobs = ci::jobs(&cwd, &provider, &pipeline);
-                let _ = tx.send(Event::CiJobs(id, pipeline.id, jobs));
-            });
-        }
         self.overlay = Overlay::Git(overlay);
+        self.refresh_ci_view();
+    }
+
+    /// Окно CI открыто: задачи загружаются сразу и обновляются сами, пока
+    /// пайплайн идёт.
+    fn refresh_ci_view(&mut self) {
+        let Overlay::Git(GitOverlay::Ci(view)) = &mut self.overlay else { return };
+        let Some(session) = self.sessions.get(self.selected) else { return };
+        if !view.wants_jobs() {
+            return;
+        }
+        view.loading = true;
+        let (id, cwd, tx) = (session.id, session.cwd.clone(), self.tx.clone());
+        let (provider, pipeline) = (view.provider.clone(), view.pipeline.clone());
+        thread::spawn(move || {
+            let jobs = ci::jobs(&cwd, &provider, &pipeline);
+            let _ = tx.send(Event::CiJobs(id, pipeline.id, jobs));
+        });
     }
 
     fn open_git_menu(&mut self) {
