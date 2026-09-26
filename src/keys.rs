@@ -21,7 +21,7 @@ pub fn latin(code: KeyCode) -> KeyCode {
     }
 }
 
-fn ru_to_en(c: char) -> Option<char> {
+pub fn ru_to_en(c: char) -> Option<char> {
     const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюёЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮЁ";
     const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~";
     RU.chars().position(|r| r == c).and_then(|i| EN.chars().nth(i))

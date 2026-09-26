@@ -1,7 +1,8 @@
 //! Одна сессия Claude Code: процесс в PTY и эмулятор его экрана.
 
 use std::io::{ErrorKind, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,8 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 const SCROLLBACK_LINES: usize = 10_000;
 /// Дольше этого не ждём конца кадра, даже если программа его не закрыла.
 const SYNC_UPDATE_MAX: Duration = Duration::from_millis(100);
+/// Сколько даём Claude на аккуратный выход, прежде чем убить.
+const STOP_GRACE: Duration = Duration::from_millis(1500);
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
@@ -30,11 +33,21 @@ const PARENT_CLAUDE_VARS: &[&str] = &[
     "CLAUDE_CODE_MESSAGING_TOKEN",
 ];
 
+/// Живые процессы Claude — чтобы погасить их, даже если vv упал.
+static LIVE_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+pub type SessionId = u64;
+
 pub struct Session {
+    pub id: SessionId,
+    pub name: String,
+    pub cwd: PathBuf,
     parser: vt100::Parser<Term>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    pid: i32,
+    exit_code: Option<u32>,
     sync_since: Option<Instant>,
 }
 
@@ -42,6 +55,8 @@ impl Session {
     /// Запускает `claude` в `cwd`. Вывод процесса приходит в `on_output`
     /// из отдельного потока; `None` — процесс закрыл терминал.
     pub fn spawn(
+        id: SessionId,
+        name: String,
         cwd: &Path,
         rows: u16,
         cols: u16,
@@ -72,6 +87,8 @@ impl Session {
             .spawn_command(cmd)
             .context("не получилось запустить claude — он установлен и есть в PATH?")?;
         drop(pty.slave);
+        let pid = child.process_id().context("у claude нет pid")? as i32;
+        LIVE_PIDS.lock().unwrap().push(pid);
 
         let mut reader = pty.master.try_clone_reader()?;
         let writer = pty.master.take_writer()?;
@@ -89,10 +106,15 @@ impl Session {
         });
 
         Ok(Self {
+            id,
+            name,
+            cwd: cwd.to_path_buf(),
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
             master: pty.master,
             writer,
             child,
+            pid,
+            exit_code: None,
             sync_since: None,
         })
     }
@@ -183,12 +205,62 @@ impl Session {
         self.parser.screen_mut().set_scrollback(0);
     }
 
-    pub fn kill(&mut self) {
-        let _ = self.child.kill();
+    /// Claude закрыл терминал: дожидаемся процесса и отдаём код выхода.
+    pub fn reap(&mut self) -> u32 {
+        stop_all(std::slice::from_mut(self));
+        self.exit_code.unwrap_or(0)
     }
 
-    pub fn wait(&mut self) -> Option<u32> {
-        self.child.wait().ok().map(|status| status.exit_code())
+    /// Сигнал всей группе процессов Claude: ему и тому, что он запустил.
+    fn signal(&self, signal: i32) {
+        unsafe {
+            libc::kill(-self.pid, signal);
+            libc::kill(self.pid, signal);
+        }
+    }
+
+    fn try_reap(&mut self) -> bool {
+        if self.exit_code.is_none()
+            && let Ok(Some(status)) = self.child.try_wait() {
+                self.set_exited(status.exit_code());
+            }
+        self.exit_code.is_some()
+    }
+
+    fn set_exited(&mut self, code: u32) {
+        self.exit_code = Some(code);
+        LIVE_PIDS.lock().unwrap().retain(|&pid| pid != self.pid);
+    }
+}
+
+/// Останавливает Claude так же, как закрытие окна терминала: SIGHUP, а кто
+/// не вышел за `STOP_GRACE` — SIGKILL. Возвращается, когда все мертвы.
+pub fn stop_all(sessions: &mut [Session]) {
+    for session in sessions.iter_mut() {
+        if !session.try_reap() {
+            session.signal(libc::SIGHUP);
+        }
+    }
+    let deadline = Instant::now() + STOP_GRACE;
+    while Instant::now() < deadline && !sessions.iter_mut().all(Session::try_reap) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    for session in sessions.iter_mut().filter(|s| s.exit_code.is_none()) {
+        session.signal(libc::SIGKILL);
+        let code = session.child.wait().map(|s| s.exit_code()).unwrap_or(1);
+        session.set_exited(code);
+    }
+}
+
+/// Для аварийного выхода, когда до сессий уже не добраться.
+pub fn hangup_all_live() {
+    if let Ok(pids) = LIVE_PIDS.try_lock() {
+        for &pid in pids.iter() {
+            unsafe {
+                libc::kill(-pid, libc::SIGHUP);
+                libc::kill(pid, libc::SIGHUP);
+            }
+        }
     }
 }
 

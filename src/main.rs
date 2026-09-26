@@ -1,6 +1,7 @@
 mod app;
 mod keys;
 mod mouse;
+mod picker;
 mod session;
 mod ui;
 mod view;
@@ -13,8 +14,9 @@ vv — Vibe Vim, терминальный пульт для вайбкодинг
   vv --version    версия
 
 Внутри:
-  Ctrl-\\          меню (режим NORMAL)
-  Ctrl-\\ q        выйти
+  Ctrl-\\          меню (режим NORMAL), там ? — все клавиши
+  Ctrl-\\ n        новая сессия
+  Ctrl-\\ q        выйти (все Claude остановятся)
 ";
 
 fn main() -> anyhow::Result<()> {
