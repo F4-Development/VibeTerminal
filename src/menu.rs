@@ -9,6 +9,7 @@ pub enum Action {
     Rename,
     Close,
     ToggleSidebar,
+    Settings,
     Help,
     Quit,
 }
@@ -41,6 +42,7 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
         ("✎", "Переименовать сессию", 'r', Action::Rename),
         ("✕", "Закрыть сессию", 'x', Action::Close),
         ("◧", sidebar_label, 'z', Action::ToggleSidebar),
+        ("⚙", "Настройки…", 's', Action::Settings),
         ("?", "Как пользоваться", '?', Action::Help),
         ("↪", "Выйти из VibeTerminal", 'q', Action::Quit),
     ];

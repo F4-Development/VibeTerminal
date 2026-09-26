@@ -656,6 +656,8 @@ fn draw_help(frame: &mut Frame, full: Rect) {
         Line::raw("          что-то сделать, внизу появятся кнопки «Разрешить»"),
         Line::raw("          и «Отклонить». Можно ответить и в окне Claude."),
         Line::raw(""),
+        Line::from(vec![Span::styled("Настройки", bold), Span::raw(" — в меню или ⌘, в VibeTerminal.")]),
+        Line::raw(""),
         Line::raw("Выделить текст мышью — с зажатым Option или Shift."),
         Line::raw("Закрыл окно терминала — все Claude останавливаются."),
     ];

@@ -428,6 +428,11 @@ impl App {
             Action::Quit if self.sessions.is_empty() => self.quit = true,
             Action::Quit => self.overlay = Overlay::Confirm(Confirm::Quit),
             Action::Help => self.overlay = Overlay::Help,
+            Action::Settings => {
+                if let Err(err) = Settings::open(&self.home) {
+                    self.set_flash(format!("настройки не открылись: {err}"));
+                }
+            }
             Action::ToggleSidebar => {
                 self.show_sidebar = !self.show_sidebar;
                 self.relayout(self.areas.full)?;

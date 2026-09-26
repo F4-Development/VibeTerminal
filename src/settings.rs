@@ -3,10 +3,13 @@
 //! изменения действуют сразу, без перезапуска.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
+const VIBETERMINAL_BUNDLE_ID: &str = "com.vibeterminal.app";
+
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
     /// Где искать проекты для «Новая сессия».
@@ -45,6 +48,29 @@ impl Settings {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
+    }
+
+    /// Открыть настройки. В VibeTerminal — его окно настроек (через
+    /// AppleScript), в другом терминале — файл настроек в редакторе.
+    pub fn open(home: &Path) -> std::io::Result<()> {
+        if std::env::var("__CFBundleIdentifier").as_deref() == Ok(VIBETERMINAL_BUNDLE_ID) {
+            let script = format!(
+                "tell application id \"{VIBETERMINAL_BUNDLE_ID}\" to perform action \"open_config\" \
+                 on focused terminal of selected tab of front window"
+            );
+            Command::new("osascript").args(["-e", &script]).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+            return Ok(());
+        }
+        let path = Self::path(home);
+        if !path.exists() {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let json = serde_json::to_string_pretty(&Settings::default()).unwrap_or_default();
+            std::fs::write(&path, json + "\n")?;
+        }
+        Command::new("open").arg("-t").arg(&path).spawn()?;
+        Ok(())
     }
 
     pub fn projects_dirs(&self, home: &Path) -> Vec<PathBuf> {
