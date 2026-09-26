@@ -8,6 +8,10 @@ pub struct Caps {
     pub truecolor: bool,
     /// Форма указателя мыши по OSC 22 («рука» над кнопками).
     pub pointer_shape: bool,
+    /// Символы вроде `♥` и значков Nerd Font рисуются шире клетки и
+    /// занимают следующую, если она пустая (Ghostty, VibeTerminal). Чтобы
+    /// после такого символа был виден пробел, нужен ещё один.
+    pub wide_symbols: bool,
 }
 
 impl Caps {
@@ -28,7 +32,8 @@ impl Caps {
             }
         };
         let pointer_shape = term_program == "ghostty" || term.contains("kitty");
-        Self { truecolor, pointer_shape }
+        let wide_symbols = term_program == "ghostty";
+        Self { truecolor, pointer_shape, wide_symbols }
     }
 }
 

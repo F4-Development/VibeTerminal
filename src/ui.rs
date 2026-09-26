@@ -612,14 +612,22 @@ pub fn waiting_button(app: &App) -> Option<(Rect, String)> {
 /// на чёрном выглядит кислотно.
 const F4_BLUE: (u8, u8, u8) = (0x6A, 0x88, 0xE8);
 pub const F4_SITE: &str = "https://f4studio.com";
-/// Сердце — с селектором текстового начертания (VS15): иначе терминал рисует
-/// его цветным эмодзи в две клетки, и оно наезжает на пробел после себя.
-const CREDIT: [&str; 4] = ["Made with ", "♥\u{FE0E}", " by ", "F4 Studio"];
+const CREDIT: [&str; 4] = ["Made with ", "♥", " by ", "F4 Studio"];
+
+/// Части подписи. В Ghostty сердце занимает и пробел за собой — даём ему
+/// ещё одну клетку, иначе «♥by» слипается.
+fn credit_parts(app: &App) -> [&'static str; 4] {
+    let mut parts = CREDIT;
+    if app.caps.wide_symbols {
+        parts[2] = "  by ";
+    }
+    parts
+}
 
 /// Справа в нижней строке. Мало места — не показываем: кнопки важнее.
 pub fn credit_rect(app: &App) -> Option<Rect> {
     let area = app.areas.bottom;
-    let w: u16 = CREDIT.iter().map(|part| width(part)).sum::<u16>() + 1;
+    let w: u16 = credit_parts(app).iter().map(|part| width(part)).sum::<u16>() + 1;
     let used = bottom_buttons(&app.areas, !app.sessions.is_empty()).last().map_or(area.x, |b| b.rect.right());
     let x = area.right().checked_sub(w)?;
     (x > used + 4).then(|| Rect::new(x, area.y, w, 1))
@@ -632,11 +640,12 @@ fn draw_credit(frame: &mut Frame, app: &App) {
     if hovered(app, Target::Credit) {
         studio = studio.add_modifier(Modifier::UNDERLINED);
     }
+    let parts = credit_parts(app);
     let line = Line::from(vec![
-        Span::styled(CREDIT[0], dim()),
-        Span::styled(CREDIT[1], Style::new().fg(view::rgb(0xE5, 0x48, 0x4D, app.caps.truecolor))),
-        Span::styled(CREDIT[2], dim()),
-        Span::styled(CREDIT[3], studio),
+        Span::styled(parts[0], dim()),
+        Span::styled(parts[1], Style::new().fg(view::rgb(0xE5, 0x48, 0x4D, app.caps.truecolor))),
+        Span::styled(parts[2], dim()),
+        Span::styled(parts[3], studio),
     ]);
     frame.render_widget(Paragraph::new(line), rect);
 }
@@ -776,7 +785,7 @@ fn input_box(app: &App) -> Option<Rect> {
     (last < agent.height).then(|| Rect::new(agent.x, agent.y + first, agent.width, last - first + 1))
 }
 
-/// Кнопка микрофона справа на верхней линии рамки поля ввода — как значок
+/// Кнопка микрофона слева на верхней линии рамки поля ввода — как значок
 /// на рамке окна. Текст Claude на линию не заходит, так что ничего не
 /// закрывает. « » — с полями, чтобы легко попасть мышью.
 fn mic_rect(app: &App) -> Option<Rect> {
@@ -785,7 +794,7 @@ fn mic_rect(app: &App) -> Option<Rect> {
     }
     let field = input_box(app)?;
     let rule = field.y.checked_sub(1).filter(|&y| y >= app.areas.agent.y)?;
-    (field.width > 10).then(|| Rect::new(field.right() - 5, rule, 3, 1))
+    (field.width > 10).then(|| Rect::new(field.x + 1, rule, 3, 1))
 }
 
 /// Где идёт запись или распознавание: поле ввода, а не нашлось — нижняя строка.
