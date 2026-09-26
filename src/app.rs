@@ -26,8 +26,9 @@ use signal_hook::iterator::Signals;
 
 use crate::menu::{self, Action};
 use crate::picker::Picker;
-use crate::session::{self, Session, SessionId};
+use crate::session::{self, Launch, Session, SessionId};
 use crate::caps::Caps;
+use crate::hooks::{Decision, HookEvent, HookServer, PermissionRequest};
 use crate::ui::{self, Areas, Target, contains};
 use crate::{keys, mouse};
 
@@ -59,6 +60,12 @@ pub enum Event {
     Term(TermEvent),
     Output(SessionId, Vec<u8>),
     Exited(SessionId),
+    /// Claude в сессии просит разрешение и ждёт ответа.
+    Permission(SessionId, PermissionRequest),
+    /// Хук запроса закрылся сам — Claude больше не ждёт.
+    PermissionGone(SessionId, u64),
+    /// Claude сообщил, что сделал: выполнил инструмент, закончил ответ…
+    Hook(SessionId, HookEvent),
     /// Терминал пользователя пропал или vv попросили закрыться.
     Hangup,
 }
@@ -90,6 +97,7 @@ pub struct App {
     next_id: SessionId,
     tx: Sender<Event>,
     pub caps: Caps,
+    launch: Launch,
     /// Что сейчас под мышью — подсвечиваем.
     pub hover: Option<Target>,
     /// Какая форма указателя мыши выставлена в терминале.
@@ -110,6 +118,13 @@ pub fn run() -> Result<()> {
     spawn_signal_thread(tx.clone())?;
     let caps = Caps::detect();
     POINTER_SHAPES.store(caps.pointer_shape, Ordering::Relaxed);
+    // Сокет живёт, пока живёт окно, и убирается при выходе.
+    let hooks = HookServer::start(&home.join(".vibevim/run"), tx.clone())?;
+    let launch = Launch {
+        truecolor: caps.truecolor,
+        socket: hooks.path.clone(),
+        vv_exe: std::env::current_exe().context("не знаю, где лежит vv")?,
+    };
 
     setup_terminal()?;
     install_panic_hook();
@@ -126,6 +141,7 @@ pub fn run() -> Result<()> {
         next_id: 1,
         tx: tx.clone(),
         caps,
+        launch,
         hover: None,
         pointer: "",
         cursor_shape: 0,
@@ -245,6 +261,31 @@ impl App {
             Event::Exited(id) => {
                 self.on_exited(id);
                 Ok(true)
+            }
+            Event::Permission(id, request) => {
+                let Some(index) = self.index_of(id) else {
+                    request.answer(Decision::AsUsual);
+                    return Ok(false);
+                };
+                let session = &mut self.sessions[index];
+                session.permissions.push_back(request);
+                if index != self.selected {
+                    let note = format!("«{}» просит разрешение", session.name);
+                    self.set_flash(note);
+                }
+                let out = terminal.backend_mut();
+                out.write_all(b"\x07")?;
+                out.flush()?;
+                Ok(true)
+            }
+            Event::PermissionGone(id, request) => {
+                let Some(index) = self.index_of(id) else { return Ok(false) };
+                self.sessions[index].permissions.retain(|r| r.id != request);
+                Ok(true)
+            }
+            Event::Hook(id, event) => {
+                let Some(index) = self.index_of(id) else { return Ok(false) };
+                Ok(self.sessions[index].resolve_permissions(&event))
             }
             Event::Hangup => {
                 self.quit = true;
@@ -502,6 +543,7 @@ impl App {
             }
             Target::DialogYes => self.confirm_yes(),
             Target::DialogNo => self.overlay = Overlay::None,
+            Target::Permit(index, decision) => self.answer_permission(index, decision),
         }
         Ok(())
     }
@@ -516,6 +558,13 @@ impl App {
         Ok(())
     }
 
+    fn answer_permission(&mut self, index: usize, decision: Decision) {
+        let Some(session) = self.sessions.get_mut(index) else { return };
+        if let Some(request) = session.permissions.pop_back() {
+            request.answer(decision);
+        }
+    }
+
     fn open(&mut self, dir: &Path) -> Result<()> {
         let folder = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
         let name = self.unique_name(&folder);
@@ -523,8 +572,8 @@ impl App {
         self.next_id += 1;
         let tx = self.tx.clone();
         let area = self.areas.agent;
-        let (rows, cols, truecolor) = (area.height.max(1), area.width.max(1), self.caps.truecolor);
-        let session = Session::spawn(id, name, dir, rows, cols, truecolor, move |chunk| {
+        let (rows, cols) = (area.height.max(1), area.width.max(1));
+        let session = Session::spawn(id, name, dir, rows, cols, &self.launch, move |chunk| {
             let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
         })?;
         self.sessions.push(session);

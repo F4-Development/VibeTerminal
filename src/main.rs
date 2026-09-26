@@ -1,5 +1,6 @@
 mod app;
 mod caps;
+mod hooks;
 mod keys;
 mod menu;
 mod mouse;
@@ -26,6 +27,8 @@ fn main() -> anyhow::Result<()> {
         match arg.as_str() {
             "-V" | "--version" => println!("vv {}", env!("CARGO_PKG_VERSION")),
             "-h" | "--help" => print!("{HELP}"),
+            // Зовёт Claude Code из хуков, руками не нужен.
+            "hook" => hooks::run_hook(&std::env::args().nth(2).unwrap_or_default()),
             other => {
                 eprintln!("vv: неизвестный аргумент «{other}»\n\n{HELP}");
                 std::process::exit(2);

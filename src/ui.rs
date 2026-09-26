@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::app::{App, Confirm, Overlay};
+use crate::hooks::{self, Decision};
 use crate::menu::{self, Action, MenuItem};
 use crate::picker::{Picker, display_path};
 use crate::session::Session;
@@ -102,6 +103,8 @@ pub enum Target {
     PickerItem(usize),
     DialogYes,
     DialogNo,
+    /// Ответ на запрос разрешения сессии с этим номером.
+    Permit(usize, Decision),
 }
 
 /// Что под мышью. Пока открыто окно, кликается только оно.
@@ -127,20 +130,70 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             }
         }
         Overlay::None => {
+            if let Some(bar) = permit_bar(app) {
+                if let Some((_, _, decision)) = bar.buttons.iter().find(|(r, _, _)| contains(*r, column, row)) {
+                    return Some(Target::Permit(app.selected, *decision));
+                }
+            } else if let Some(button) = bottom_buttons(&app.areas).into_iter().find(|b| contains(b.rect, column, row)) {
+                return Some(Target::Bottom(button.action));
+            }
             if contains(menu_button(app.areas.top), column, row) {
                 return Some(Target::MenuButton);
-            }
-            if let Some(button) = bottom_buttons(&app.areas).into_iter().find(|b| contains(b.rect, column, row)) {
-                return Some(Target::Bottom(button.action));
             }
             let (cards, new_button) = sidebar_parts(app.areas.sidebar?);
             if contains(new_button, column, row) {
                 return Some(Target::NewSession);
             }
-            let index = card_at(cards, cards_offset(cards, app.selected), column, row)?;
-            (index < app.sessions.len()).then_some(Target::Card(index))
+            let offset = cards_offset(cards, app.selected);
+            let index = card_at(cards, offset, column, row).filter(|&i| i < app.sessions.len())?;
+            if !app.sessions[index].permissions.is_empty() {
+                let [yes, no] = card_buttons(cards, offset, index);
+                if contains(yes, column, row) {
+                    return Some(Target::Permit(index, Decision::Allow));
+                }
+                if contains(no, column, row) {
+                    return Some(Target::Permit(index, Decision::Deny));
+                }
+            }
+            Some(Target::Card(index))
         }
     }
+}
+
+const PERMIT_BUTTONS: [(&str, Decision); 2] = [(" ✓ Разрешить ", Decision::Allow), (" ✕ Отклонить ", Decision::Deny)];
+const CARD_YES: &str = "✓ Да";
+const CARD_NO: &str = "✕ Нет";
+
+/// Нижняя строка, пока Claude в открытой сессии ждёт разрешения: что он
+/// просит и кнопки. Окно Claude не закрываем — там его родной диалог.
+pub struct PermitBar {
+    pub text: String,
+    pub buttons: Vec<(Rect, &'static str, Decision)>,
+}
+
+pub fn permit_bar(app: &App) -> Option<PermitBar> {
+    let session = app.current();
+    let request = session.pending_permission()?;
+    let (what, detail) = hooks::describe(&request.tool, &request.input, &session.cwd);
+    let detail = detail.lines().next().unwrap_or_default();
+    let bottom = app.areas.bottom;
+    let mut x = bottom.right();
+    let mut buttons = Vec::new();
+    for (label, decision) in PERMIT_BUTTONS.iter().rev() {
+        let w = width(label);
+        x = x.saturating_sub(w + 1);
+        buttons.push((Rect::new(x, bottom.y, w, 1), *label, *decision));
+    }
+    buttons.reverse();
+    Some(PermitBar { text: format!(" ! Claude просит: {what}: {detail}"), buttons })
+}
+
+/// Кнопки «Да / Нет» в третьей строке карточки ждущей сессии.
+pub fn card_buttons(cards: Rect, offset: usize, index: usize) -> [Rect; 2] {
+    let y = cards.y + (index - offset) as u16 * CARD_ROWS + 2;
+    let yes = Rect::new(cards.x + 2, y, width(CARD_YES), 1);
+    let no = Rect::new(yes.right() + 3, y, width(CARD_NO), 1);
+    [yes, no]
 }
 
 pub fn menu_button(top: Rect) -> Rect {
@@ -264,6 +317,10 @@ fn hovered(app: &App, target: Target) -> bool {
     app.hover == Some(target)
 }
 
+fn bold() -> Style {
+    Style::new().add_modifier(Modifier::BOLD)
+}
+
 fn accent() -> Style {
     Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
@@ -370,8 +427,21 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Line::from(vec![Span::raw("  "), Span::raw(session.name.as_str())])
         };
-        let detail = Line::from(Span::styled(format!("  {}", session_detail(session, &app.home)), dim()));
+        if session.permissions.is_empty() {
+            let detail = Line::from(Span::styled(format!("  {}", session_detail(session, &app.home)), dim()));
+            frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
+            continue;
+        }
+        let waiting = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let detail = Line::from(Span::styled("  ! ждёт разрешения", waiting));
         frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
+        let [yes, no] = card_buttons(cards, offset, i);
+        if yes.bottom() <= cards.bottom() {
+            let yes_style = if hovered(app, Target::Permit(i, Decision::Allow)) { primary() } else { accent() };
+            let no_style = if hovered(app, Target::Permit(i, Decision::Deny)) { primary() } else { bold() };
+            frame.render_widget(Paragraph::new(Span::styled(CARD_YES, yes_style)), yes);
+            frame.render_widget(Paragraph::new(Span::styled(CARD_NO, no_style)), no);
+        }
     }
     let style = if hovered(app, Target::NewSession) { primary() } else { accent() };
     frame.render_widget(Paragraph::new(Span::styled(NEW_BUTTON, style)), button);
@@ -395,6 +465,18 @@ fn draw_agent(frame: &mut Frame, app: &App) {
 
 fn draw_bottom(frame: &mut Frame, app: &App) {
     let area = app.areas.bottom;
+    if let Some(bar) = permit_bar(app) {
+        let text_width = bar.buttons.first().map_or(area.width, |(r, _, _)| r.x.saturating_sub(area.x + 1));
+        let waiting = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let text = Rect::new(area.x, area.y, text_width, 1);
+        frame.render_widget(Paragraph::new(Span::styled(bar.text.as_str(), waiting)), text);
+        for (rect, label, decision) in &bar.buttons {
+            let hover = hovered(app, Target::Permit(app.selected, *decision));
+            let style = if hover || *decision == Decision::Allow { primary() } else { bold() };
+            frame.render_widget(Paragraph::new(Span::styled(*label, style)), *rect);
+        }
+        return;
+    }
     let buttons = bottom_buttons(&app.areas);
     for button in &buttons {
         let line = if hovered(app, Target::Bottom(button.action)) {
@@ -519,6 +601,10 @@ fn draw_help(frame: &mut Frame, full: Rect) {
         Line::raw(""),
         Line::from(vec![Span::styled("Мышь    ", bold), Span::raw(" — клик по сессии слева открывает её,")]),
         Line::raw("          все кнопки кликаются, колесо листает историю."),
+        Line::raw(""),
+        Line::from(vec![Span::styled("Разрешения", bold), Span::raw(" — когда Claude спрашивает, можно ли")]),
+        Line::raw("          что-то сделать, внизу появятся кнопки «Разрешить»"),
+        Line::raw("          и «Отклонить». Можно ответить и в окне Claude."),
         Line::raw(""),
         Line::raw("Выделить текст мышью — с зажатым Option или Shift."),
         Line::raw("Закрыл окно терминала — все Claude останавливаются."),

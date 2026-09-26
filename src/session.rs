@@ -1,5 +1,6 @@
 //! Одна сессия Claude Code: процесс в PTY и эмулятор его экрана.
 
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -8,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+use crate::hooks::{self, Decision, HookEvent, PermissionRequest};
 
 const SCROLLBACK_LINES: usize = 10_000;
 /// Дольше этого не ждём конца кадра, даже если программа его не закрыла.
@@ -38,10 +41,20 @@ static LIVE_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 pub type SessionId = u64;
 
+/// Как запускать Claude в этом окне vv.
+pub struct Launch {
+    pub truecolor: bool,
+    /// Сокет окна vv, куда стучатся хуки.
+    pub socket: PathBuf,
+    pub vv_exe: PathBuf,
+}
+
 pub struct Session {
     pub id: SessionId,
     pub name: String,
     pub cwd: PathBuf,
+    /// Запросы разрешения, которые ждут ответа. Показываем последний.
+    pub permissions: VecDeque<PermissionRequest>,
     parser: vt100::Parser<Term>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -60,7 +73,7 @@ impl Session {
         cwd: &Path,
         rows: u16,
         cols: u16,
-        truecolor: bool,
+        launch: &Launch,
         on_output: impl Fn(Option<Vec<u8>>) + Send + 'static,
     ) -> Result<Self> {
         let pty = native_pty_system().openpty(pty_size(rows, cols))?;
@@ -72,19 +85,29 @@ impl Session {
                 cmd.args(["-c", &script]);
                 cmd
             }
-            Err(_) => CommandBuilder::new("claude"),
+            Err(_) => {
+                let mut cmd = CommandBuilder::new("claude");
+                cmd.args(["--settings", &hooks::settings_json(&launch.vv_exe)]);
+                // VV_CLAUDE_ARGS — дополнительные флаги claude (для отладки).
+                if let Ok(extra) = std::env::var("VV_CLAUDE_ARGS") {
+                    cmd.args(extra.split_whitespace());
+                }
+                cmd
+            }
         };
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         // Говорим Claude правду о цветах: без 24-битного цвета он сам выберет
         // палитру из 256, которую понимает терминал.
-        if truecolor {
+        if launch.truecolor {
             cmd.env("COLORTERM", "truecolor");
         } else {
             cmd.env_remove("COLORTERM");
         }
         cmd.env("TERM_PROGRAM", "vibevim");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        cmd.env(hooks::ENV_SESSION, id.to_string());
+        cmd.env(hooks::ENV_SOCKET, &launch.socket);
         for var in PARENT_CLAUDE_VARS {
             cmd.env_remove(var);
         }
@@ -116,6 +139,7 @@ impl Session {
             id,
             name,
             cwd: cwd.to_path_buf(),
+            permissions: VecDeque::new(),
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
             master: pty.master,
             writer,
@@ -154,6 +178,33 @@ impl Session {
     pub fn frame_hold(&self) -> Option<Duration> {
         let left = SYNC_UPDATE_MAX.checked_sub(self.sync_since?.elapsed())?;
         (!left.is_zero()).then_some(left)
+    }
+
+    /// Запрос, который сейчас показываем: самый свежий.
+    pub fn pending_permission(&self) -> Option<&PermissionRequest> {
+        self.permissions.back()
+    }
+
+    /// Убирает запросы, на которые уже ответили в окне Claude: инструмент
+    /// выполнился или получил отказ, либо Claude закончил или получил новое
+    /// сообщение. Возвращает `true`, если что-то убрали.
+    pub fn resolve_permissions(&mut self, event: &HookEvent) -> bool {
+        let before = self.permissions.len();
+        let answered: Vec<PermissionRequest> = match event.name.as_str() {
+            "Stop" | "UserPromptSubmit" => self.permissions.drain(..).collect(),
+            _ => {
+                let (done, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.permissions)
+                    .into_iter()
+                    .partition(|r| r.tool_use_id.is_some() && r.tool_use_id == event.tool_use_id);
+                self.permissions = waiting.into();
+                done
+            }
+        };
+        // Хуку отвечаем пусто: Claude уже решил сам, пусть хук просто закроется.
+        for request in answered {
+            request.answer(Decision::AsUsual);
+        }
+        self.permissions.len() != before
     }
 
     /// Форма курсора, которую попросил Claude (DECSCUSR), если просил.
