@@ -171,6 +171,11 @@ fn serve(stream: UnixStream, tx: Sender<Event>) {
     let tool_use_id = payload["tool_use_id"].as_str().map(str::to_string);
     match message["event"].as_str() {
         Some("permission") => {}
+        // Клик по уведомлению в VibeTerminal.
+        Some("open") => {
+            let _ = tx.send(Event::OpenSession(session as SessionId));
+            return;
+        }
         Some("event") => {
             let text = |key: &str| payload[key].as_str().unwrap_or_default().to_string();
             let event = HookEvent {

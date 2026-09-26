@@ -43,6 +43,8 @@ fn key_bytes(name: &str) -> Vec<u8> {
         "enter" => b"\r".to_vec(),
         "esc" => b"\x1b".to_vec(),
         "tab" => b"\t".to_vec(),
+        "focusin" => b"\x1b[I".to_vec(),
+        "focusout" => b"\x1b[O".to_vec(),
         "prefix" => b"\x1c".to_vec(),
         "up" => b"\x1b[A".to_vec(),
         "down" => b"\x1b[B".to_vec(),

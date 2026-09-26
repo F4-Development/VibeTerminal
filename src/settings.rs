@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 
 const VIBETERMINAL_BUNDLE_ID: &str = "com.vibeterminal.app";
 
+/// vv запущен внутри VibeTerminal, а не в другом терминале.
+pub fn in_vibeterminal() -> bool {
+    std::env::var("__CFBundleIdentifier").as_deref() == Ok(VIBETERMINAL_BUNDLE_ID)
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
@@ -21,8 +26,19 @@ pub struct Settings {
     pub model: String,
     /// Любые дополнительные флаги `claude`.
     pub extra_args: String,
-    /// Звуковой сигнал, когда Claude просит разрешение.
-    pub permission_sound: bool,
+    /// Уведомить, когда сессия ждёт тебя: разрешение, вопрос, план.
+    pub notify_waiting: bool,
+    /// Уведомить, когда Claude закончил…
+    pub notify_done: bool,
+    /// …если работал хотя бы столько секунд.
+    pub notify_done_after: u64,
+    /// Уведомить, когда ход оборвался ошибкой: лимит, вход, сервер.
+    pub notify_failed: bool,
+    /// Баннер macOS, пока окно VibeTerminal не в фокусе.
+    pub notify_banner: bool,
+    /// Системный звук из /System/Library/Sounds (`Glass`, `Ping`…).
+    /// Пусто — без звука.
+    pub notify_sound: String,
 }
 
 impl Default for Settings {
@@ -32,7 +48,12 @@ impl Default for Settings {
             permission_mode: String::new(),
             model: String::new(),
             extra_args: String::new(),
-            permission_sound: true,
+            notify_waiting: true,
+            notify_done: true,
+            notify_done_after: 30,
+            notify_failed: true,
+            notify_banner: true,
+            notify_sound: "Glass".into(),
         }
     }
 }
@@ -53,7 +74,7 @@ impl Settings {
     /// Открыть настройки. В VibeTerminal — его окно настроек (через
     /// AppleScript), в другом терминале — файл настроек в редакторе.
     pub fn open(home: &Path) -> std::io::Result<()> {
-        if std::env::var("__CFBundleIdentifier").as_deref() == Ok(VIBETERMINAL_BUNDLE_ID) {
+        if in_vibeterminal() {
             let script = format!(
                 "tell application id \"{VIBETERMINAL_BUNDLE_ID}\" to perform action \"open_config\" \
                  on focused terminal of selected tab of front window"
@@ -106,7 +127,8 @@ mod tests {
     fn missing_fields_take_defaults() {
         let settings: Settings = serde_json::from_str(r#"{"model": "sonnet"}"#).unwrap();
         assert_eq!(settings.model, "sonnet");
-        assert!(settings.permission_sound);
+        assert!(settings.notify_done);
+        assert_eq!(settings.notify_sound, "Glass");
         assert_eq!(settings.projects_dirs, vec!["~/Projects"]);
     }
 

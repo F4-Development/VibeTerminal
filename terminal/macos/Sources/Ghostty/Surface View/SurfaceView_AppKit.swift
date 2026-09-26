@@ -1675,18 +1675,25 @@ extension Ghostty {
 
         /// Show a user notification and associate it with this surface
         func showUserNotification(title: String, body: String, requireFocus: Bool = true) {
+            // От vv: сессия в заголовке, звук vv играет сам.
+            let vv = VibeNotification(title: title)
             let content = UNMutableNotificationContent()
-            content.title = title
-            content.subtitle = self.title
+            content.title = vv?.title ?? title
+            content.subtitle = vv == nil ? self.title : ""
             content.body = body
-            content.sound = UNNotificationSound.default
+            content.sound = vv == nil ? UNNotificationSound.default : nil
             content.categoryIdentifier = Ghostty.userNotificationCategory
-            content.userInfo = [
+            var userInfo: [AnyHashable: Any] = [
                 "surface": self.id.uuidString,
                 "requireFocus": requireFocus,
             ]
+            if let vv {
+                userInfo["vvSession"] = vv.session
+                userInfo["vvSocket"] = vv.socket
+            }
+            content.userInfo = userInfo
 
-            let uuid = UUID().uuidString
+            let uuid = vv?.identifier ?? UUID().uuidString
             let request = UNNotificationRequest(
                 identifier: uuid,
                 content: content,
@@ -1726,6 +1733,11 @@ extension Ghostty {
             if focus {
                 self.window?.makeKeyAndOrderFront(self)
                 Ghostty.moveFocus(to: self)
+                // Уведомление от vv — открыть в нём ту сессию.
+                let info = notification.request.content.userInfo
+                if let session = info["vvSession"] as? Int, let socket = info["vvSocket"] as? String {
+                    VibeNotification.open(session: session, socket: socket)
+                }
             }
         }
 

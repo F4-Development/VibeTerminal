@@ -27,13 +27,14 @@ use signal_hook::iterator::Signals;
 use crate::menu::{self, Action};
 use crate::picker::Picker;
 use crate::session::{self, Launch, Program, Session, SessionId};
-use crate::status;
+use crate::notify::{self, Notifier};
+use crate::status::{self, State};
 use crate::settings::Settings;
 use crate::caps::Caps;
 use crate::ci::{self, CiState, Job};
 use crate::git::{self, GitOp, OpResult, RepoStatus};
 use crate::gitui::{self, GitOverlay};
-use crate::hooks::{Decision, HookEvent, HookServer, PermissionRequest};
+use crate::hooks::{self, Decision, HookEvent, HookServer, PermissionRequest};
 use crate::ui::{self, Areas, Target, contains};
 use crate::{keys, mouse};
 
@@ -88,6 +89,8 @@ pub enum Event {
     PermissionGone(SessionId, u64),
     /// Claude сообщил, что сделал: выполнил инструмент, закончил ответ…
     Hook(SessionId, HookEvent),
+    /// Кликнули по уведомлению этой сессии.
+    OpenSession(SessionId),
     /// Терминал пользователя пропал или vv попросили закрыться.
     Hangup,
 }
@@ -135,6 +138,7 @@ pub struct App {
     /// Окно VibeTerminal сейчас в фокусе: открытую сессию ты видишь.
     focused: bool,
     last_git_tick: Instant,
+    notifier: Notifier,
     quit: bool,
 }
 
@@ -168,6 +172,7 @@ pub fn run() -> Result<()> {
         next_id: 1,
         tx: tx.clone(),
         caps,
+        notifier: Notifier::new(launch.socket.clone()),
         launch,
         hover: None,
         pointer: "",
@@ -223,6 +228,7 @@ impl App {
             for session in &mut self.sessions {
                 dirty |= session.status.settle();
             }
+            let banner_due = self.notifier.flush(terminal.backend_mut())?;
             let hold = self.current().and_then(Session::frame_hold);
             if dirty && hold.is_none() {
                 self.draw(terminal)?;
@@ -236,6 +242,7 @@ impl App {
                 (false, Some(_)) => FLASH_FOR.min(tick),
                 (false, None) => tick,
             };
+            let wake = banner_due.map_or(wake, |due| due.min(wake));
             let event = match rx.recv_timeout(wake) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
@@ -322,11 +329,7 @@ impl App {
                     let note = format!("«{}» {asks}", session.name);
                     self.set_flash(note);
                 }
-                if Settings::load(&self.home).permission_sound {
-                    let out = terminal.backend_mut();
-                    out.write_all(b"\x07")?;
-                    out.flush()?;
-                }
+                self.notify(index, notify::Kind::Waiting);
                 Ok(true)
             }
             Event::PermissionGone(id, request) => {
@@ -341,10 +344,27 @@ impl App {
                     self.refresh_git(index);
                 }
                 let session = &mut self.sessions[index];
+                let before = session.status.state;
+                let worked = session.status.since.elapsed();
                 let resolved = session.resolve_permissions(&event);
                 let changed = session.status.on_event(&event, &session.cwd);
+                let after = session.status.state;
+                if after != before {
+                    let long_enough = worked.as_secs() >= Settings::load(&self.home).notify_done_after;
+                    match after {
+                        State::Done if before == State::Working && long_enough => self.notify(index, notify::Kind::Done),
+                        State::Failed => self.notify(index, notify::Kind::Failed),
+                        _ => {}
+                    }
+                }
                 self.mark_seen();
                 Ok(resolved || changed)
+            }
+            Event::OpenSession(id) => {
+                let Some(index) = self.index_of(id) else { return Ok(false) };
+                self.overlay = Overlay::None;
+                self.select(index)?;
+                Ok(true)
             }
             Event::GitStatus(id, status) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
@@ -445,6 +465,9 @@ impl App {
             Event::Term(TermEvent::FocusGained | TermEvent::FocusLost) => {
                 let gained = matches!(event, Event::Term(TermEvent::FocusGained));
                 self.focused = gained;
+                if gained {
+                    self.notifier.clear();
+                }
                 self.send_focus(self.selected, gained)?;
                 Ok(self.mark_seen())
             }
@@ -818,6 +841,38 @@ impl App {
         self.refresh_git(index);
         self.fetch_if_stale(index);
         self.send_focus(index, true)
+    }
+
+    /// Сессия ждёт тебя, закончила или упала — позвать, если ты смотришь
+    /// не на неё. Окно в фокусе, но открыта другая сессия — звук и строка
+    /// внизу; окно не в фокусе — ещё и баннер.
+    fn notify(&mut self, index: usize, kind: notify::Kind) {
+        let settings = Settings::load(&self.home);
+        let Some(session) = self.sessions.get(index) else { return };
+        let looking = self.focused && index == self.selected;
+        let (title, body) = match kind {
+            notify::Kind::Waiting => {
+                let Some(request) = session.pending_permission() else { return };
+                let (what, detail) = hooks::describe(&request.tool, &request.input, &session.cwd);
+                if request.is_question() {
+                    (format!("{} {what}", session.name), detail)
+                } else {
+                    (format!("{} просит разрешение", session.name), format!("{what}: {detail}"))
+                }
+            }
+            notify::Kind::Done => {
+                let body = if session.status.detail.is_empty() { "Claude закончил работу" } else { &session.status.detail };
+                (format!("{} закончил", session.name), body.to_string())
+            }
+            notify::Kind::Failed => (format!("{}: ошибка", session.name), session.status.detail.clone()),
+        };
+        let id = session.id;
+        if index != self.selected && kind != notify::Kind::Waiting {
+            self.set_flash(format!("«{title}»"));
+        }
+        if !looking && kind.enabled(&settings) {
+            self.notifier.send(&settings, id, title, &body, self.focused);
+        }
     }
 
     /// Открытую сессию ты видишь — её «готово» прочитано.

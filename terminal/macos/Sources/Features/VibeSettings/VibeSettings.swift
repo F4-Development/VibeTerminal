@@ -41,6 +41,8 @@ struct VibeSettingsView: View {
                 .tabItem { Label("Окна", systemImage: "macwindow") }
             ClaudeSettings()
                 .tabItem { Label("Claude", systemImage: "sparkles") }
+            NotificationSettings()
+                .tabItem { Label("Уведомления", systemImage: "bell") }
         }
         .frame(width: 580, height: 540)
     }
@@ -230,14 +232,24 @@ struct VvSettings: Codable, Equatable {
     var permissionMode = ""
     var model = ""
     var extraArgs = ""
-    var permissionSound = true
+    var notifyWaiting = true
+    var notifyDone = true
+    var notifyDoneAfter = 30
+    var notifyFailed = true
+    var notifyBanner = true
+    var notifySound = "Glass"
 
     enum CodingKeys: String, CodingKey {
         case projectsDirs = "projects_dirs"
         case permissionMode = "permission_mode"
         case model
         case extraArgs = "extra_args"
-        case permissionSound = "permission_sound"
+        case notifyWaiting = "notify_waiting"
+        case notifyDone = "notify_done"
+        case notifyDoneAfter = "notify_done_after"
+        case notifyFailed = "notify_failed"
+        case notifyBanner = "notify_banner"
+        case notifySound = "notify_sound"
     }
 
     init() {}
@@ -249,8 +261,12 @@ struct VvSettings: Codable, Equatable {
         permissionMode = try container.decodeIfPresent(String.self, forKey: .permissionMode) ?? defaults.permissionMode
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? defaults.model
         extraArgs = try container.decodeIfPresent(String.self, forKey: .extraArgs) ?? defaults.extraArgs
-        permissionSound = try container.decodeIfPresent(Bool.self, forKey: .permissionSound)
-            ?? defaults.permissionSound
+        notifyWaiting = try container.decodeIfPresent(Bool.self, forKey: .notifyWaiting) ?? defaults.notifyWaiting
+        notifyDone = try container.decodeIfPresent(Bool.self, forKey: .notifyDone) ?? defaults.notifyDone
+        notifyDoneAfter = try container.decodeIfPresent(Int.self, forKey: .notifyDoneAfter) ?? defaults.notifyDoneAfter
+        notifyFailed = try container.decodeIfPresent(Bool.self, forKey: .notifyFailed) ?? defaults.notifyFailed
+        notifyBanner = try container.decodeIfPresent(Bool.self, forKey: .notifyBanner) ?? defaults.notifyBanner
+        notifySound = try container.decodeIfPresent(String.self, forKey: .notifySound) ?? defaults.notifySound
     }
 
     static var url: URL {
@@ -324,10 +340,6 @@ struct ClaudeSettings: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-
-            Section("Сигналы") {
-                Toggle("Звук, когда Claude просит разрешение", isOn: $settings.permissionSound)
-            }
         }
         .formStyle(.grouped)
         .onAppear { settings = VvSettings.load() }
@@ -349,6 +361,75 @@ struct ClaudeSettings: View {
                 settings.projectsDirs.append(path)
             }
         }
+    }
+}
+
+// MARK: - Уведомления
+
+/// Когда vv зовёт тебя и как: баннер macOS и звук. Пишется в vv.json,
+/// действует сразу.
+struct NotificationSettings: View {
+    @State private var settings = VvSettings.load()
+
+    private static let sounds = [
+        "Basso", "Blow", "Bottle", "Frog", "Funk", "Glass", "Hero",
+        "Morse", "Ping", "Pop", "Purr", "Sosumi", "Submarine", "Tink",
+    ]
+    private static let delays: [(String, Int)] = [
+        ("сколько угодно", 0), ("10 секунд", 10), ("30 секунд", 30),
+        ("1 минуту", 60), ("2 минуты", 120), ("5 минут", 300),
+    ]
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Сессия ждёт тебя: разрешение, вопрос, план", isOn: $settings.notifyWaiting)
+                Toggle("Claude закончил", isOn: $settings.notifyDone)
+                Picker("Если работал хотя бы", selection: $settings.notifyDoneAfter) {
+                    ForEach(Self.delays, id: \.1) { Text($0.0).tag($0.1) }
+                }
+                .disabled(!settings.notifyDone)
+                Toggle("Ошибка: лимит, вход, сервер", isOn: $settings.notifyFailed)
+            } header: {
+                Text("Когда звать")
+            } footer: {
+                Text("Не беспокоим, если ты смотришь на эту сессию.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Баннер, когда окно VibeTerminal не на переднем плане", isOn: $settings.notifyBanner)
+                HStack {
+                    Picker("Звук", selection: $settings.notifySound) {
+                        Text("Без звука").tag("")
+                        ForEach(Self.sounds, id: \.self) { Text($0).tag($0) }
+                    }
+                    Button {
+                        NSSound(named: NSSound.Name(settings.notifySound))?.play()
+                    } label: {
+                        Image(systemName: "play.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Прослушать")
+                    .disabled(settings.notifySound.isEmpty)
+                }
+                Button("Уведомления в настройках macOS…") {
+                    let link = "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+                    if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+                }
+            } header: {
+                Text("Как")
+            } footer: {
+                Text("Окно открыто, но ты в другой сессии — только звук и подсказка внизу. "
+                    + "Клик по баннеру открывает нужную сессию.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { settings = VvSettings.load() }
+        .onChange(of: settings) { newValue in newValue.save() }
     }
 }
 #endif

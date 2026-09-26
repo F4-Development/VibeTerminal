@@ -7,6 +7,7 @@ mod hooks;
 mod keys;
 mod menu;
 mod mouse;
+mod notify;
 mod picker;
 mod session;
 mod settings;
