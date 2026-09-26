@@ -58,6 +58,11 @@ fn color(color: vt100::Color, truecolor: bool) -> Color {
     }
 }
 
+/// Цвет RGB для своего интерфейса: без 24-битного цвета — ближайший из 256.
+pub fn rgb(r: u8, g: u8, b: u8, truecolor: bool) -> Color {
+    if truecolor { Color::Rgb(r, g, b) } else { Color::Indexed(rgb_to_256(r, g, b)) }
+}
+
 /// Ближайший цвет из стандартной палитры xterm: куб 6×6×6 или 24 оттенка серого.
 fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];

@@ -941,6 +941,9 @@ impl App {
             Target::Ci => self.open_ci(),
             Target::Usage => self.perform(Action::Usage)?,
             Target::Mic => self.perform(Action::Voice)?,
+            Target::Credit => {
+                thread::spawn(|| Command::new("open").arg(ui::F4_SITE).stdout(Stdio::null()).stderr(Stdio::null()).status());
+            }
             Target::UsageRow(index) => {
                 self.overlay = Overlay::Usage(index);
                 self.toggle_usage(index);

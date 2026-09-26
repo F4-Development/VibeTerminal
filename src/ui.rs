@@ -123,6 +123,8 @@ pub enum Target {
     UsageRefresh,
     /// Микрофон в поле ввода (или идущая запись) — голосовой ввод.
     Mic,
+    /// «Made with ♥ by F4 Studio» справа внизу — открывает сайт.
+    Credit,
 }
 
 /// Что под мышью. Пока открыто окно, кликается только оно.
@@ -169,6 +171,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             }
             if permit_bar(app).is_none() && waiting_button(app).is_some_and(|(r, _)| contains(r, column, row)) {
                 return Some(Target::NextWaiting);
+            }
+            if permit_bar(app).is_none() && credit_rect(app).is_some_and(|r| contains(r, column, row)) {
+                return Some(Target::Credit);
             }
             if let Some(bar) = permit_bar(app) {
                 if let Some((_, _, decision)) = bar.buttons.iter().find(|(r, _, _)| contains(*r, column, row)) {
@@ -596,8 +601,41 @@ pub fn waiting_button(app: &App) -> Option<(Rect, String)> {
     let area = app.areas.bottom;
     let w = width(&label);
     let used = bottom_buttons(&app.areas, !app.sessions.is_empty()).last().map_or(area.x, |b| b.rect.right());
-    let x = area.right().checked_sub(w)?;
+    let right = credit_rect(app).map_or(area.right(), |r| r.x.saturating_sub(3));
+    let x = right.checked_sub(w)?;
     (x > used + 1).then(|| (Rect::new(x, area.y, w, 1), label))
+}
+
+// ── Подпись F4 Studio ────────────────────────────────────────────────────
+
+/// Фирменный синий F4 Studio.
+const F4_BLUE: (u8, u8, u8) = (0x14, 0x47, 0xE6);
+pub const F4_SITE: &str = "https://f4studio.com";
+const CREDIT: [&str; 4] = ["Made with ", "♥", " by ", "F4 Studio"];
+
+/// Справа в нижней строке. Мало места — не показываем: кнопки важнее.
+pub fn credit_rect(app: &App) -> Option<Rect> {
+    let area = app.areas.bottom;
+    let w: u16 = CREDIT.iter().map(|part| width(part)).sum::<u16>() + 1;
+    let used = bottom_buttons(&app.areas, !app.sessions.is_empty()).last().map_or(area.x, |b| b.rect.right());
+    let x = area.right().checked_sub(w)?;
+    (x > used + 4).then(|| Rect::new(x, area.y, w, 1))
+}
+
+fn draw_credit(frame: &mut Frame, app: &App) {
+    let Some(rect) = credit_rect(app) else { return };
+    let (r, g, b) = F4_BLUE;
+    let mut studio = Style::new().fg(view::rgb(r, g, b, app.caps.truecolor)).add_modifier(Modifier::BOLD);
+    if hovered(app, Target::Credit) {
+        studio = studio.add_modifier(Modifier::UNDERLINED);
+    }
+    let line = Line::from(vec![
+        Span::styled(CREDIT[0], dim()),
+        Span::styled(CREDIT[1], Style::new().fg(view::rgb(0xE5, 0x48, 0x4D, app.caps.truecolor))),
+        Span::styled(CREDIT[2], dim()),
+        Span::styled(CREDIT[3], studio),
+    ]);
+    frame.render_widget(Paragraph::new(line), rect);
 }
 
 fn draw_agent(frame: &mut Frame, app: &App) {
@@ -735,14 +773,16 @@ fn input_box(app: &App) -> Option<Rect> {
     (last < agent.height).then(|| Rect::new(agent.x, agent.y + first, agent.width, last - first + 1))
 }
 
-/// Кнопка микрофона справа в первой строке поля ввода: « » — с полями,
-/// чтобы легко попасть мышью.
+/// Кнопка микрофона справа на верхней линии рамки поля ввода — как значок
+/// на рамке окна. Текст Claude на линию не заходит, так что ничего не
+/// закрывает. « » — с полями, чтобы легко попасть мышью.
 fn mic_rect(app: &App) -> Option<Rect> {
     if !matches!(app.voice, VoiceState::Idle) || !matches!(app.overlay, Overlay::None) {
         return None;
     }
     let field = input_box(app)?;
-    (field.width > 10).then(|| Rect::new(field.right() - 4, field.y, 3, 1))
+    let rule = field.y.checked_sub(1).filter(|&y| y >= app.areas.agent.y)?;
+    (field.width > 10).then(|| Rect::new(field.right() - 5, rule, 3, 1))
 }
 
 /// Где идёт запись или распознавание: поле ввода, а не нашлось — нижняя строка.
@@ -1047,13 +1087,15 @@ fn draw_bottom(frame: &mut Frame, app: &App) {
         let scrolled = app.current().map_or(0, Session::scrollback);
         (scrolled > 0).then(|| format!("↑ история, {scrolled} строк вверх · любая клавиша — вниз"))
     });
+    draw_credit(frame, app);
+    let credit_at = credit_rect(app).map(|r| r.x.saturating_sub(2));
     let waiting_at = waiting_button(app).map(|(rect, label)| {
         let style = if hovered(app, Target::NextWaiting) { primary() } else { waiting() };
         frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
         rect.x.saturating_sub(2)
     });
     if let Some(note) = note {
-        let right = waiting_at.unwrap_or(area.right());
+        let right = waiting_at.or(credit_at).unwrap_or(area.right());
         let used = buttons.last().map_or(area.x, |b| b.rect.right());
         let free = right.saturating_sub(used + 2);
         if width(&note) <= free {
