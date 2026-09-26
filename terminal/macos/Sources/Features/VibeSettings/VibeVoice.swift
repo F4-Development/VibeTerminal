@@ -190,6 +190,10 @@ struct VoiceSettings: View {
                     Text("Вставить в поле ввода — отправлю сам").tag("insert")
                 }
                 .pickerStyle(.radioGroup)
+                Toggle(isOn: $settings.voiceSounds) {
+                    Text("Звуки начала и конца записи")
+                    Text("Как при диктовке в macOS")
+                }
                 Picker("Микрофон", selection: $settings.voiceDevice) {
                     Text("Как в настройках macOS").tag("")
                     if !microphones.isEmpty { Divider() }

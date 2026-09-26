@@ -75,7 +75,7 @@ struct Cleanup(u32);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if std::env::var_os("DRIVE_KEEP_STATE").is_some() {
+        if std::env::var_os("DRIVE_KEEP_STATE").is_some_and(|v| !v.is_empty()) {
             return;
         }
         let Some(home) = std::env::var_os("HOME") else { return };

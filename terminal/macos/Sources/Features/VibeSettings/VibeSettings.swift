@@ -74,7 +74,7 @@ enum VibeSettingsTab: String, CaseIterable {
         switch self {
         case .claude: 430
         case .notifications: 470
-        case .voice: 640
+        case .voice: 690
         case .look: 250
         }
     }
@@ -149,6 +149,7 @@ struct VvSettings: Codable, Equatable {
     var voiceLanguage = "ru"
     var voiceWords = ""
     var voiceDevice = ""
+    var voiceSounds = true
 
     enum CodingKeys: String, CodingKey {
         case projectsDirs = "projects_dirs"
@@ -168,6 +169,7 @@ struct VvSettings: Codable, Equatable {
         case voiceLanguage = "voice_language"
         case voiceWords = "voice_words"
         case voiceDevice = "voice_device"
+        case voiceSounds = "voice_sounds"
     }
 
     init() {}
@@ -192,6 +194,7 @@ struct VvSettings: Codable, Equatable {
         voiceLanguage = try c.decodeIfPresent(String.self, forKey: .voiceLanguage) ?? d.voiceLanguage
         voiceWords = try c.decodeIfPresent(String.self, forKey: .voiceWords) ?? d.voiceWords
         voiceDevice = try c.decodeIfPresent(String.self, forKey: .voiceDevice) ?? d.voiceDevice
+        voiceSounds = try c.decodeIfPresent(Bool.self, forKey: .voiceSounds) ?? d.voiceSounds
     }
 
     static var url: URL {

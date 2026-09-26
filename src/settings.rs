@@ -53,6 +53,8 @@ pub struct Settings {
     pub voice_after: String,
     /// Имя микрофона; пусто — системный.
     pub voice_device: String,
+    /// Звуки диктовки macOS в начале и в конце записи.
+    pub voice_sounds: bool,
 }
 
 impl Default for Settings {
@@ -75,6 +77,7 @@ impl Default for Settings {
             voice_mode: "press".into(),
             voice_after: "send".into(),
             voice_device: String::new(),
+            voice_sounds: true,
         }
     }
 }

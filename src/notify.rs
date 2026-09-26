@@ -124,6 +124,32 @@ pub fn play(name: &str) -> bool {
     true
 }
 
+/// Звуки диктовки macOS — те же, что при нажатии клавиши микрофона.
+const DICTATION_SOUNDS: &str = "/System/Library/PrivateFrameworks/AssistantServices.framework/Versions/A/Resources";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cue {
+    /// Запись пошла.
+    Begin,
+    /// Запись закончена — распознаём.
+    Confirm,
+    /// Запись отменили.
+    Cancel,
+}
+
+/// Сыграть звук диктовки. Нет файла (другая версия macOS) — тихо.
+pub fn cue(cue: Cue) {
+    let file = match cue {
+        Cue::Begin => "dt-begin.caf",
+        Cue::Confirm => "dt-confirm.caf",
+        Cue::Cancel => "dt-cancel.caf",
+    };
+    let path = Path::new(DICTATION_SOUNDS).join(file);
+    if path.exists() {
+        spawn(Command::new("afplay").arg(path));
+    }
+}
+
 fn sound_path(name: &str) -> Option<PathBuf> {
     let name = name.trim();
     if name.is_empty() || name.contains(['/', '.']) {

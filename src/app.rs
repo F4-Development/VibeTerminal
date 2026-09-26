@@ -1372,7 +1372,12 @@ impl App {
             _ => "Enter — отправить · Esc — отмена ",
         };
         match voice::Recording::start(&settings.voice_device) {
-            Ok(recording) => self.voice = VoiceState::Recording { session: id, recording, hint },
+            Ok(recording) => {
+                if settings.voice_sounds {
+                    notify::cue(notify::Cue::Begin);
+                }
+                self.voice = VoiceState::Recording { session: id, recording, hint };
+            }
             Err(text) => self.set_flash(format!("Голос: {text}")),
         }
     }
@@ -1388,6 +1393,9 @@ impl App {
             self.open_voice_settings();
             return;
         };
+        if settings.voice_sounds {
+            notify::cue(notify::Cue::Confirm);
+        }
         self.voice = VoiceState::Transcribing { session, since: Instant::now() };
         let tx = self.tx.clone();
         thread::spawn(move || {
@@ -1399,7 +1407,11 @@ impl App {
     }
 
     fn cancel_voice(&mut self) {
-        if let VoiceState::Recording { recording, .. } = std::mem::replace(&mut self.voice, VoiceState::Idle) {
+        let was = std::mem::replace(&mut self.voice, VoiceState::Idle);
+        if !matches!(was, VoiceState::Idle) && Settings::load(&self.home).voice_sounds {
+            notify::cue(notify::Cue::Cancel);
+        }
+        if let VoiceState::Recording { recording, .. } = was {
             recording.cancel();
         }
     }
