@@ -73,7 +73,7 @@ enum VibeSettingsTab: String, CaseIterable {
     var height: CGFloat {
         switch self {
         case .claude: 430
-        case .notifications: 470
+        case .notifications: 540
         case .voice: 690
         case .look: 250
         }
@@ -138,6 +138,7 @@ struct VvSettings: Codable, Equatable {
     var notifyDoneAfter = 30
     var notifyFailed = true
     var notifyBanner = true
+    var notifyPopup = true
     var notifySound = "Glass"
     /// Какие лимиты vv показывает внизу — выбирают галочками в самом vv.
     var usageShown = ["context", "session"]
@@ -161,6 +162,7 @@ struct VvSettings: Codable, Equatable {
         case notifyDoneAfter = "notify_done_after"
         case notifyFailed = "notify_failed"
         case notifyBanner = "notify_banner"
+        case notifyPopup = "notify_popup"
         case notifySound = "notify_sound"
         case usageShown = "usage_shown"
         case voiceModel = "voice_model"
@@ -186,6 +188,7 @@ struct VvSettings: Codable, Equatable {
         notifyDoneAfter = try c.decodeIfPresent(Int.self, forKey: .notifyDoneAfter) ?? d.notifyDoneAfter
         notifyFailed = try c.decodeIfPresent(Bool.self, forKey: .notifyFailed) ?? d.notifyFailed
         notifyBanner = try c.decodeIfPresent(Bool.self, forKey: .notifyBanner) ?? d.notifyBanner
+        notifyPopup = try c.decodeIfPresent(Bool.self, forKey: .notifyPopup) ?? d.notifyPopup
         notifySound = try c.decodeIfPresent(String.self, forKey: .notifySound) ?? d.notifySound
         usageShown = try c.decodeIfPresent([String].self, forKey: .usageShown) ?? d.usageShown
         voiceModel = try c.decodeIfPresent(String.self, forKey: .voiceModel) ?? d.voiceModel
@@ -344,6 +347,10 @@ struct NotificationSettings: View {
             }
 
             Section {
+                Toggle(isOn: $settings.notifyPopup) {
+                    Text("Окно для ответа")
+                    Text("Claude ждёт, а ты в другом приложении — окно поверх всех программ: разрешить, ответить на вопрос, утвердить план.")
+                }
                 Toggle(isOn: $settings.notifyBanner) {
                     Text("Баннер")
                     Text("Когда окно VibeTerminal не на переднем плане. Клик открывает нужную сессию.")

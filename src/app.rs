@@ -118,6 +118,10 @@ pub enum Event {
     VoiceText(SessionId, Result<String, String>),
     /// Проверили новую версию vv: запускается или нет.
     ReloadChecked(PathBuf, bool),
+    /// Всплывающее окно VibeTerminal спрашивает, что показать по запросу.
+    AskQuery(SessionId, u64, Sender<String>),
+    /// …и присылает ответ; `true` в канал — ответ принят.
+    AskAnswer(SessionId, u64, serde_json::Value, Sender<bool>),
     /// Терминал пользователя пропал или vv попросили закрыться.
     Hangup,
 }
@@ -507,6 +511,37 @@ impl App {
                     (Ok(_), None) => {}
                     (Err(text), _) => self.set_flash(format!("Голос: {text}")),
                 }
+                Ok(true)
+            }
+            Event::AskQuery(id, request, reply) => {
+                let found = self.index_of(id).and_then(|index| {
+                    let session = &self.sessions[index];
+                    let pending = session.permissions.iter().find(|r| r.id == request)?;
+                    Some(crate::ask::describe(pending, &session.name, &session.cwd, &self.home))
+                });
+                // Уже ответили (в терминале или тут) — окну пора закрыться.
+                let text = found.map_or_else(|| serde_json::json!({ "gone": true }).to_string(), |v| v.to_string());
+                let _ = reply.send(text);
+                Ok(false)
+            }
+            Event::AskAnswer(id, request, answer, reply) => {
+                let Some(index) = self.index_of(id) else {
+                    let _ = reply.send(false);
+                    return Ok(false);
+                };
+                let session = &mut self.sessions[index];
+                let Some(position) = session.permissions.iter().position(|r| r.id == request) else {
+                    let _ = reply.send(false);
+                    return Ok(false);
+                };
+                let Some(decision) = crate::ask::decision(&session.permissions[position], &answer) else {
+                    let _ = reply.send(false);
+                    return Ok(false);
+                };
+                if let Some(pending) = session.permissions.remove(position) {
+                    pending.answer_with(decision);
+                }
+                let _ = reply.send(true);
                 Ok(true)
             }
             Event::ReloadChecked(path, works) => {
@@ -1251,7 +1286,17 @@ impl App {
             self.set_flash(format!("«{title}»"));
         }
         if !looking && kind.enabled(&settings) {
-            self.notifier.send(&settings, id, title, &body, self.focused);
+            // Ты в другом приложении, Claude ждёт ответа — окно поверх всех
+            // программ, где можно сразу ответить. Нет такого окна — баннер.
+            let request = self.sessions.get(index).and_then(|s| s.pending_permission()).map(|r| r.id);
+            let popup = kind == notify::Kind::Waiting && !self.focused && settings.notify_popup;
+            let asked = match request {
+                Some(request) if popup => self.notifier.ask(&settings, id, request, title.clone(), &body),
+                _ => false,
+            };
+            if !asked {
+                self.notifier.send(&settings, id, title, &body, self.focused);
+            }
         }
     }
 

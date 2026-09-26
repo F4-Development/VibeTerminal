@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -25,7 +25,7 @@ use crate::status;
 
 /// Сколько Claude ждёт ответа на запрос разрешения: сутки — ты мог уйти.
 const PERMISSION_TIMEOUT_SECS: u64 = 24 * 60 * 60;
-const DENY_MESSAGE: &str = "Пользователь отклонил это действие в VibeTerminal.";
+pub const DENY_MESSAGE: &str = "Пользователь отклонил это действие в VibeTerminal.";
 
 pub const ENV_SOCKET: &str = "VV_SOCK";
 pub const ENV_SESSION: &str = "VV_SESSION";
@@ -41,6 +41,8 @@ pub struct PermissionRequest {
     pub input: Value,
     /// Когда пришёл: кто дольше ждёт — первым в очереди.
     pub at: Instant,
+    /// Что Claude предлагает для «разрешать всегда» (правило, режим).
+    pub suggestions: Value,
     reply: Sender<Reply>,
 }
 
@@ -66,6 +68,18 @@ const ANSWERED_IN_SESSION: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 impl PermissionRequest {
     pub fn answer(self, decision: Decision) {
         let _ = self.reply.send(Reply::Answer(decision_json(decision)));
+    }
+
+    /// Ответить готовым решением: с ответами на вопросы, правилами и т.п.
+    pub fn answer_with(self, decision: Value) {
+        let json = json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision } });
+        let _ = self.reply.send(Reply::Answer(json.to_string()));
+    }
+
+    #[cfg(test)]
+    pub fn for_test(tool: &str, input: Value, suggestions: Value) -> Self {
+        let (reply, _) = mpsc::channel();
+        Self { id: 0, tool_use_id: None, tool: tool.into(), input, at: Instant::now(), suggestions, reply }
     }
 
     /// Вопрос или план, а не просьба что-то разрешить.
@@ -215,6 +229,26 @@ fn serve(stream: UnixStream, tx: Sender<Event>) {
             let _ = tx.send(Event::StatusLine(session as SessionId, StatusLine::from_payload(payload)));
             return;
         }
+        // Всплывающее окно VibeTerminal: описание запроса…
+        Some("ask") => {
+            let request = message["request"].as_u64().unwrap_or(0);
+            let (reply, answer) = mpsc::channel();
+            if tx.send(Event::AskQuery(session as SessionId, request, reply)).is_ok()
+                && let Ok(text) = answer.recv_timeout(Duration::from_secs(3))
+            {
+                let _ = (&stream).write_all(text.as_bytes());
+            }
+            return;
+        }
+        // …и ответ из него.
+        Some("ask-answer") => {
+            let request = message["request"].as_u64().unwrap_or(0);
+            let (reply, answer) = mpsc::channel();
+            let sent = tx.send(Event::AskAnswer(session as SessionId, request, message["answer"].clone(), reply));
+            let ok = sent.is_ok() && answer.recv_timeout(Duration::from_secs(3)).unwrap_or(false);
+            let _ = (&stream).write_all(json!({ "ok": ok }).to_string().as_bytes());
+            return;
+        }
         // Клик по уведомлению в VibeTerminal.
         Some("open") => {
             let _ = tx.send(Event::OpenSession(session as SessionId));
@@ -255,6 +289,7 @@ fn serve(stream: UnixStream, tx: Sender<Event>) {
         tool: payload["tool_name"].as_str().unwrap_or("?").to_string(),
         input: payload["tool_input"].clone(),
         at: Instant::now(),
+        suggestions: payload["permission_suggestions"].clone(),
         reply,
     };
     if tx.send(Event::Permission(session as SessionId, request)).is_err() {

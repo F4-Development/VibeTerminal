@@ -740,6 +740,9 @@ const Subprocess = struct {
         // Set environment variables used by some programs (such as neovim) to detect
         // which terminal emulator and version they're running under.
         try env.put("TERM_PROGRAM", "ghostty");
+        // VibeTerminal умеет окно для ответа Claude (метка ⟦vv-ask⟧). Старая
+        // версия приложения этого не умеет — vv тогда шлёт обычный баннер.
+        try env.put("VIBETERMINAL_ASK", "1");
         try env.put("TERM_PROGRAM_VERSION", build_config.version_string);
 
         // VTE_VERSION is set by gnome-terminal and other VTE-based terminals.

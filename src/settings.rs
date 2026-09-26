@@ -36,6 +36,9 @@ pub struct Settings {
     pub notify_failed: bool,
     /// Баннер macOS, пока окно VibeTerminal не в фокусе.
     pub notify_banner: bool,
+    /// Всплывающее окно вместо баннера, когда Claude ждёт ответа, а ты в
+    /// другом приложении: разрешить, ответить, утвердить план прямо в нём.
+    pub notify_popup: bool,
     /// Системный звук из /System/Library/Sounds (`Glass`, `Ping`…).
     /// Пусто — без звука.
     pub notify_sound: String,
@@ -69,6 +72,7 @@ impl Default for Settings {
             notify_done_after: 30,
             notify_failed: true,
             notify_banner: true,
+            notify_popup: true,
             notify_sound: "Glass".into(),
             usage_shown: vec!["context".into(), "session".into()],
             voice_model: String::new(),

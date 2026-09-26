@@ -1396,6 +1396,11 @@ extension Ghostty {
             title: String,
             body: String,
             requireFocus: Bool = true) {
+            // vv просит окно для ответа Claude, а не баннер.
+            if let ask = VibeAsk(title: title) {
+                DispatchQueue.main.async { VibeAskPanel.shared.show(ask) }
+                return
+            }
             let center = UNUserNotificationCenter.current()
             center.requestAuthorization(options: [.alert, .sound]) { _, error in
                 if let error = error {

@@ -47,6 +47,8 @@ struct Banner {
     session: SessionId,
     title: String,
     body: String,
+    /// Не баннер, а всплывающее окно для ответа на этот запрос.
+    ask: Option<u64>,
 }
 
 pub struct Notifier {
@@ -56,12 +58,15 @@ pub struct Notifier {
     /// Сокет этого окна vv: по нему VibeTerminal сообщит о клике.
     socket: PathBuf,
     in_vibeterminal: bool,
+    /// Эта версия VibeTerminal умеет окно для ответа (ставит `VIBETERMINAL_ASK`).
+    can_ask: bool,
 }
 
 impl Notifier {
     pub fn new(socket: PathBuf) -> Self {
         let in_vibeterminal = settings::in_vibeterminal();
-        Self { queue: VecDeque::new(), last_banner: None, last_sound: None, socket, in_vibeterminal }
+        let can_ask = in_vibeterminal && std::env::var_os("VIBETERMINAL_ASK").is_some();
+        Self { queue: VecDeque::new(), last_banner: None, last_sound: None, socket, in_vibeterminal, can_ask }
     }
 
     /// Звук сразу, баннер — в очередь, если окно не в фокусе.
@@ -72,8 +77,22 @@ impl Notifier {
         if settings.notify_banner && !focused {
             // Новое уведомление сессии заменяет ещё не показанное.
             self.queue.retain(|banner| banner.session != session);
-            self.queue.push_back(Banner { session, title, body: short(body) });
+            self.queue.push_back(Banner { session, title, body: short(body), ask: None });
         }
+    }
+
+    /// Всплывающее окно VibeTerminal для ответа. Только в VibeTerminal —
+    /// `false`, если здесь его нет (тогда нужен обычный баннер).
+    pub fn ask(&mut self, settings: &Settings, session: SessionId, request: u64, title: String, body: &str) -> bool {
+        if !self.can_ask {
+            return false;
+        }
+        if self.last_sound.is_none_or(|at| at.elapsed() >= SOUND_GAP) && play(&settings.notify_sound) {
+            self.last_sound = Some(Instant::now());
+        }
+        self.queue.retain(|banner| banner.session != session);
+        self.queue.push_back(Banner { session, title, body: short(body), ask: Some(request) });
+        true
     }
 
     /// Окно снова в фокусе — неотправленные баннеры уже не нужны.
@@ -108,7 +127,11 @@ fn osc_777(banner: &Banner, socket: &Path) -> String {
     // `;` делит поля, управляющие символы оборвали бы последовательность.
     let title = clean(&banner.title).replace(';', ",");
     let body = clean(&banner.body);
-    format!("\x1b]777;notify;⟦vv:{}:{}⟧{title};{body}\x1b\\", banner.session, socket.display())
+    let mark = match banner.ask {
+        Some(request) => crate::ask::marker(banner.session, request, socket),
+        None => format!("⟦vv:{}:{}⟧", banner.session, socket.display()),
+    };
+    format!("\x1b]777;notify;{mark}{title};{body}\x1b\\")
 }
 
 fn osascript(banner: &Banner) {
@@ -187,7 +210,7 @@ mod tests {
 
     #[test]
     fn marks_banner_for_vibeterminal() {
-        let banner = Banner { session: 3, title: "api; закончил".into(), body: "Готово\x07 всё".into() };
+        let banner = Banner { session: 3, title: "api; закончил".into(), body: "Готово\x07 всё".into(), ask: None };
         let osc = osc_777(&banner, Path::new("/tmp/run/1.sock"));
         assert_eq!(osc, "\x1b]777;notify;⟦vv:3:/tmp/run/1.sock⟧api, закончил;Готово  всё\x1b\\");
     }
