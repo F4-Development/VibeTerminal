@@ -49,13 +49,14 @@ final class VibeSettingsController: NSWindowController {
 }
 
 enum VibeSettingsTab: String, CaseIterable {
-    case claude, notifications, voice, look, updates
+    case claude, notifications, voice, keys, look, updates
 
     var title: String {
         switch self {
         case .claude: "Claude"
         case .notifications: "Уведомления"
         case .voice: "Голос"
+        case .keys: "Клавиши"
         case .look: "Вид"
         case .updates: "Обновления"
         }
@@ -66,6 +67,7 @@ enum VibeSettingsTab: String, CaseIterable {
         case .claude: "sparkles"
         case .notifications: "bell.badge"
         case .voice: "mic"
+        case .keys: "keyboard"
         case .look: "textformat.size"
         case .updates: "arrow.down.circle"
         }
@@ -77,6 +79,7 @@ enum VibeSettingsTab: String, CaseIterable {
         case .claude: 430
         case .notifications: 540
         case .voice: 690
+        case .keys: 650
         case .look: 250
         case .updates: 220
         }
@@ -87,6 +90,7 @@ enum VibeSettingsTab: String, CaseIterable {
         case .claude: AnyView(ClaudeSettings())
         case .notifications: AnyView(NotificationSettings())
         case .voice: AnyView(VoiceSettings())
+        case .keys: AnyView(KeySettings())
         case .look: AnyView(LookSettings())
         case .updates: AnyView(UpdateSettings())
         }
@@ -155,6 +159,9 @@ struct VvSettings: Codable, Equatable {
     var voiceWords = ""
     var voiceDevice = ""
     var voiceSounds = true
+    /// Горячие клавиши, изменённые на вкладке «Клавиши»: действие →
+    /// сочетание (`cmd+t`, пусто — выключено); остальные — по умолчанию.
+    var keys: [String: String] = [:]
 
     enum CodingKeys: String, CodingKey {
         case projectsDirs = "projects_dirs"
@@ -176,6 +183,7 @@ struct VvSettings: Codable, Equatable {
         case voiceWords = "voice_words"
         case voiceDevice = "voice_device"
         case voiceSounds = "voice_sounds"
+        case keys
     }
 
     init() {}
@@ -202,6 +210,7 @@ struct VvSettings: Codable, Equatable {
         voiceWords = try c.decodeIfPresent(String.self, forKey: .voiceWords) ?? d.voiceWords
         voiceDevice = try c.decodeIfPresent(String.self, forKey: .voiceDevice) ?? d.voiceDevice
         voiceSounds = try c.decodeIfPresent(Bool.self, forKey: .voiceSounds) ?? d.voiceSounds
+        keys = try c.decodeIfPresent([String: String].self, forKey: .keys) ?? d.keys
     }
 
     static var url: URL {

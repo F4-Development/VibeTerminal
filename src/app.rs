@@ -3,6 +3,7 @@
 //! Всё, что печатаешь, уходит в выбранного Claude. `Ctrl-\` открывает меню,
 //! остальное — кнопками и мышью.
 
+use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -40,6 +41,7 @@ use crate::ci::{self, CiState, Job};
 use crate::git::{self, GitOp, OpResult, RepoStatus};
 use crate::gitui::{self, GitOverlay};
 use crate::hooks::{self, Decision, HookEvent, HookServer, PermissionRequest, StatusLine};
+use crate::hotkeys::{self, Hotkey};
 use crate::ui::{self, Areas, Target, contains};
 use crate::{keys, mouse};
 
@@ -160,6 +162,9 @@ pub struct App {
     pub overlay: Overlay,
     pub areas: Areas,
     pub home: PathBuf,
+    /// Горячие клавиши из настроек — для подсказок в меню; обновляются при
+    /// каждом нажатии.
+    pub keys: BTreeMap<String, String>,
     show_sidebar: bool,
     flash: Option<(String, Instant)>,
     next_id: SessionId,
@@ -219,8 +224,10 @@ pub fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = Terminal::new(CrosstermBackend::new(BufWriter::with_capacity(FRAME_BUFFER, io::stdout())))?;
     let size = terminal.size()?;
-    let usage_shown = Settings::load(&home).usage_shown;
+    let settings = Settings::load(&home);
+    let (usage_shown, keys) = (settings.usage_shown, settings.keys);
     let mut app = App {
+        keys,
         sessions: Vec::new(),
         selected: 0,
         overlay: Overlay::None,
@@ -718,17 +725,24 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // ⌘⇧Space VibeTerminal отдаёт как F13 (нажали) и F14 (отпустили).
-        let hold = Settings::load(&self.home).voice_mode == "hold";
+        let settings = Settings::load(&self.home);
+        self.keys = settings.keys.clone();
+        // Сочетание из настроек: VibeTerminal присылает служебную клавишу,
+        // в другом терминале ловим сами.
+        let from_app = hotkeys::service(&key);
+        let hotkey = from_app.or_else(|| hotkeys::from_key(&key, &settings.keys));
+        // Отпускание клавиши знает только VibeTerminal — без него запись
+        // всегда по нажатию.
+        let hold = settings.voice_mode == "hold" && from_app.is_some();
         // Идёт запись: Enter — распознать, Esc — отменить, остальное не в Claude.
         if matches!(self.voice, VoiceState::Recording { .. }) {
-            match key.code {
-                KeyCode::Enter => self.finish_voice(),
-                KeyCode::Esc => self.cancel_voice(),
+            match (key.code, hotkey) {
+                (KeyCode::Enter, _) => self.finish_voice(),
+                (KeyCode::Esc, _) => self.cancel_voice(),
                 // «Нажать и говорить»: второе нажатие — готово.
-                KeyCode::F(13) if !hold => self.finish_voice(),
+                (_, Some(Hotkey::VoicePress)) if !hold => self.finish_voice(),
                 // «Удерживать клавишу»: отпустил — готово.
-                KeyCode::F(14) if hold => self.finish_voice(),
+                (_, Some(Hotkey::VoiceRelease)) if hold => self.finish_voice(),
                 _ => {}
             }
             return Ok(true);
@@ -737,13 +751,8 @@ impl App {
             self.cancel_voice();
             return Ok(true);
         }
-        match key.code {
-            KeyCode::F(13) if matches!(self.overlay, Overlay::None) => {
-                self.start_voice();
-                return Ok(true);
-            }
-            KeyCode::F(14) => return Ok(false),
-            _ => {}
+        if let Some(hotkey) = hotkey {
+            return self.on_hotkey(hotkey);
         }
         if !matches!(self.overlay, Overlay::None) {
             return self.on_overlay_key(key);
@@ -758,6 +767,47 @@ impl App {
         if !bytes.is_empty() {
             session.write(&bytes)?;
         }
+        Ok(true)
+    }
+
+    /// Горячая клавиша действия — работает и поверх открытых окон vv.
+    fn on_hotkey(&mut self, hotkey: Hotkey) -> Result<bool> {
+        let has_session = !self.sessions.is_empty();
+        let action = match hotkey {
+            Hotkey::VoiceRelease => return Ok(false),
+            Hotkey::VoicePress => {
+                if !matches!(self.overlay, Overlay::None) {
+                    return Ok(false);
+                }
+                self.start_voice();
+                return Ok(true);
+            }
+            Hotkey::Menu => {
+                self.overlay = match self.overlay {
+                    Overlay::Menu(_) => Overlay::None,
+                    _ => Overlay::Menu(self.selected),
+                };
+                return Ok(true);
+            }
+            Hotkey::Next | Hotkey::Previous => {
+                let len = self.sessions.len();
+                if len == 0 {
+                    return Ok(false);
+                }
+                let step = if hotkey == Hotkey::Next { 1 } else { len - 1 };
+                Action::Select((self.selected + step) % len)
+            }
+            Hotkey::Session(index) if index < self.sessions.len() => Action::Select(index),
+            Hotkey::Session(_) => return Ok(false),
+            Hotkey::New => Action::New,
+            Hotkey::NextWaiting => Action::NextWaiting,
+            Hotkey::Usage => Action::Usage,
+            Hotkey::Git | Hotkey::Rename | Hotkey::Close if !has_session => return Ok(false),
+            Hotkey::Git => Action::Git,
+            Hotkey::Rename => Action::Rename,
+            Hotkey::Close => Action::Close,
+        };
+        self.perform(action)?;
         Ok(true)
     }
 

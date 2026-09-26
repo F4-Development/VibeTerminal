@@ -2,6 +2,7 @@
 //! VibeTerminal (⌘,), можно и руками. Читаются при каждом использовании —
 //! изменения действуют сразу, без перезапуска.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -58,6 +59,9 @@ pub struct Settings {
     pub voice_device: String,
     /// Звуки диктовки macOS в начале и в конце записи.
     pub voice_sounds: bool,
+    /// Горячие клавиши, изменённые в настройках: действие → сочетание
+    /// (`cmd+t`, пусто — выключено). Остальные — по умолчанию, см. `hotkeys`.
+    pub keys: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -82,6 +86,7 @@ impl Default for Settings {
             voice_after: "send".into(),
             voice_device: String::new(),
             voice_sounds: true,
+            keys: BTreeMap::new(),
         }
     }
 }

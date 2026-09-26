@@ -56,6 +56,8 @@ fn key_bytes(name: &str) -> Vec<u8> {
         "wheelup" => b"\x1b[<64;60;10M".to_vec(),
         "wheeldown" => b"\x1b[<65;60;10M".to_vec(),
         "pgup" => b"\x1b[5~".to_vec(),
+        // Служебные клавиши VibeTerminal (см. hotkeys.rs): `csi:33;2~` — Shift+F16.
+        other if other.starts_with("csi:") => format!("\x1b[{}", &other[4..]).into_bytes(),
         other if other.starts_with("move:") => {
             let (col, row) = other[5..].split_once(',').unwrap();
             format!("\x1b[<35;{col};{row}M").into_bytes()

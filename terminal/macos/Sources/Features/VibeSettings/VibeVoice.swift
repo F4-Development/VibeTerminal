@@ -158,6 +158,9 @@ struct VoiceSettings: View {
     @State private var settings = VvSettings.load()
     @ObservedObject private var downloads = VoiceDownloads.shared
     @State private var deleting: VoiceModel?
+    private var voiceKey: String {
+        KeyCombo(VibeHotkey.voice.combo(in: settings.keys))?.display ?? "клавишу голосового ввода"
+    }
     private let microphones = AVCaptureDevice.DiscoverySession(
         deviceTypes: [.builtInMicrophone, .externalUnknown], mediaType: .audio, position: .unspecified
     ).devices.map(\.localizedName)
@@ -183,8 +186,8 @@ struct VoiceSettings: View {
                 }
                 .pickerStyle(.radioGroup)
                 Hint(settings.voiceMode == "hold"
-                    ? "Запись идёт, пока держишь ⌘⇧Space. Отпустил — распознано. Микрофон в поле ввода работает как «Нажать и говорить»."
-                    : "Нажми ⌘⇧Space или микрофон в поле ввода и говори. Enter — готово, Esc — отменить.")
+                    ? "Запись идёт, пока держишь \(voiceKey). Отпустил — распознано. Микрофон в поле ввода работает как «Нажать и говорить»."
+                    : "Нажми \(voiceKey) или микрофон в поле ввода и говори. Enter — готово, Esc — отменить.")
                 Picker("Распознанный текст", selection: $settings.voiceAfter) {
                     Text("Сразу отправить Claude").tag("send")
                     Text("Вставить в поле ввода — отправлю сам").tag("insert")

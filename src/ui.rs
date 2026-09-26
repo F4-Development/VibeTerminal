@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use crate::app::{App, Confirm, Overlay, VoiceState};
 use crate::gitui::{self, GitTarget};
 use crate::hooks::{self, Decision};
+use crate::hotkeys;
 use crate::menu::{self, Action, MenuItem};
 use crate::picker::{Picker, display_path};
 use crate::session::Session;
@@ -1139,9 +1140,17 @@ fn draw_menu(frame: &mut Frame, app: &App, cursor: usize) {
             Span::styled(format!(" {}", item.label), style),
         ]);
         frame.render_widget(Paragraph::new(line).style(style), row);
-        if let Some(key) = item.hotkey {
-            let hint = Span::styled(format!("{} ", key.to_uppercase()), if i == cursor { style } else { dim() });
-            frame.render_widget(Paragraph::new(hint).alignment(Alignment::Right), row);
+        // Справа: сочетание из настроек (⌘T) и буква в меню.
+        let combo = menu::hotkey(item.action).and_then(|hotkey| hotkeys::label(&app.keys, hotkey));
+        let letter = item.hotkey.map(|key| key.to_uppercase().to_string());
+        if combo.is_some() || letter.is_some() {
+            let hint_style = if i == cursor { style } else { dim() };
+            let mut hint = Vec::new();
+            if let Some(combo) = combo {
+                hint.push(Span::styled(format!("{combo}  "), hint_style));
+            }
+            hint.push(Span::styled(format!("{} ", letter.unwrap_or_default()), hint_style));
+            frame.render_widget(Paragraph::new(Line::from(hint)).alignment(Alignment::Right), row);
         }
     }
 }

@@ -208,8 +208,8 @@ class AppDelegate: NSObject,
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // ⌘⇧Space — голосовой ввод vv (нажатие и отпускание).
-        VibeVoiceHotkey.shared.install()
+        // Горячие клавиши vv (⌘T, ⇧⌘Space…) ловит само приложение.
+        VibeHotkeys.shared.install()
         // Новая версия на GitHub — окно «Доступно обновление».
         VibeUpdater.shared.start()
 
@@ -1232,6 +1232,9 @@ extension AppDelegate {
 
         // Dock menu
         reloadDockMenu()
+
+        // Сочетания горячих клавиш vv — не у пунктов меню.
+        VibeHotkeys.shared.syncMenu()
     }
 
     /// Syncs a single menu shortcut for the given action. The action string is the same

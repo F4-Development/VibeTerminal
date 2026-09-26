@@ -1,5 +1,6 @@
 //! Меню по `Ctrl-\`: сессии и все действия с подписанными клавишами.
 
+use crate::hotkeys::Hotkey;
 use crate::session::Session;
 use crate::status;
 
@@ -69,6 +70,21 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
         items.push(MenuItem { icon, label: label.to_string(), hotkey: Some(key), action, gap_before: i == 0 });
     }
     items
+}
+
+/// Горячая клавиша пункта — её сочетание показываем рядом.
+pub fn hotkey(action: Action) -> Option<Hotkey> {
+    Some(match action {
+        Action::Select(index) => Hotkey::Session(index),
+        Action::New => Hotkey::New,
+        Action::Voice => Hotkey::VoicePress,
+        Action::NextWaiting => Hotkey::NextWaiting,
+        Action::Git => Hotkey::Git,
+        Action::Rename => Hotkey::Rename,
+        Action::Close => Hotkey::Close,
+        Action::Usage => Hotkey::Usage,
+        Action::ToggleSidebar | Action::Settings | Action::Help | Action::Quit => return None,
+    })
 }
 
 pub fn by_hotkey(items: &[MenuItem], key: char) -> Option<Action> {

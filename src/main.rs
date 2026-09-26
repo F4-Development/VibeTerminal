@@ -5,6 +5,7 @@ mod gitui;
 mod caps;
 mod ci;
 mod hooks;
+mod hotkeys;
 mod keys;
 mod menu;
 mod mouse;
