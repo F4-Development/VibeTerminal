@@ -299,9 +299,10 @@ impl App {
                     return Ok(false);
                 };
                 let session = &mut self.sessions[index];
+                let asks = if request.is_question() { "ждёт ответа" } else { "просит разрешение" };
                 session.permissions.push_back(request);
                 if index != self.selected {
-                    let note = format!("«{}» просит разрешение", session.name);
+                    let note = format!("«{}» {asks}", session.name);
                     self.set_flash(note);
                 }
                 if Settings::load(&self.home).permission_sound {

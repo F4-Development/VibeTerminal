@@ -54,9 +54,19 @@ pub enum Decision {
     AsUsual,
 }
 
+/// Инструменты, где Claude спрашивает на своей карточке: выбрать вариант или
+/// утвердить план. «Разрешить / Отклонить» тут не подходят — отвечают в окне
+/// сессии (Claude сам помечает их как requiresUserInteraction).
+const ANSWERED_IN_SESSION: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+
 impl PermissionRequest {
     pub fn answer(self, decision: Decision) {
         let _ = self.reply.send(Reply::Answer(decision_json(decision)));
+    }
+
+    /// Вопрос или план, а не просьба что-то разрешить.
+    pub fn is_question(&self) -> bool {
+        ANSWERED_IN_SESSION.contains(&self.tool.as_str())
     }
 }
 
@@ -221,15 +231,47 @@ pub fn describe(tool: &str, input: &Value, cwd: &Path) -> (String, String) {
         "WebFetch" => ("Открыть сайт", text("url")),
         "WebSearch" => ("Искать в интернете", text("query")),
         "Task" | "Agent" => ("Запустить помощника", text("description")),
+        "Skill" => ("Запустить навык", text("skill")),
+        "AskUserQuestion" => ("спрашивает", question(input)),
+        "ExitPlanMode" => ("предлагает план", plan_title(input)),
         _ if tool.starts_with("mcp__") => {
             let mut parts = tool.splitn(3, "__").skip(1);
             let server = parts.next().unwrap_or_default();
             let name = parts.next().unwrap_or_default();
             return (format!("Инструмент {server}"), name.to_string());
         }
-        _ => return (tool.to_string(), input.to_string()),
+        _ => return (tool.to_string(), first_text(input)),
     };
     (what.to_string(), detail)
+}
+
+/// Первый вопрос; если их несколько — сколько всего.
+fn question(input: &Value) -> String {
+    let questions = input["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let first = questions.first().and_then(|q| q["question"].as_str()).unwrap_or_default();
+    match questions.len() {
+        0 | 1 => first.to_string(),
+        n => format!("{first} (вопросов: {n})"),
+    }
+}
+
+/// Первая непустая строка плана без `#`, иначе имя файла с планом.
+fn plan_title(input: &Value) -> String {
+    let plan = input["plan"].as_str().unwrap_or_default();
+    plan.lines()
+        .map(|line| line.trim_start_matches('#').trim())
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let path = Path::new(input["planFilePath"].as_str()?);
+            Some(path.file_name()?.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default()
+}
+
+/// Незнакомый инструмент: первое текстовое поле, а не весь JSON.
+fn first_text(input: &Value) -> String {
+    input.as_object().and_then(|fields| fields.values().find_map(Value::as_str)).unwrap_or_default().to_string()
 }
 
 #[cfg(test)]
@@ -269,6 +311,19 @@ mod tests {
             ("Изменить файл".into(), "src/a.ts".into())
         );
         assert_eq!(describe("mcp__figma__use_figma", &json!({}), cwd), ("Инструмент figma".into(), "use_figma".into()));
+    }
+
+    #[test]
+    fn describes_questions_and_plans_without_json() {
+        let cwd = Path::new("/p");
+        let one = json!({"questions": [{"question": "Какой объём?", "header": "Объём", "options": [{"label": "Всё"}]}]});
+        assert_eq!(describe("AskUserQuestion", &one, cwd), ("спрашивает".into(), "Какой объём?".into()));
+        let two = json!({"questions": [{"question": "Какой объём?"}, {"question": "Как CI?"}]});
+        assert_eq!(describe("AskUserQuestion", &two, cwd).1, "Какой объём? (вопросов: 2)");
+        let plan = json!({"plan": "\n## План: git в шапке\n\n1. Шапка", "planFilePath": "/tmp/plans/a.md"});
+        assert_eq!(describe("ExitPlanMode", &plan, cwd).1, "План: git в шапке");
+        assert_eq!(describe("ExitPlanMode", &json!({"planFilePath": "/tmp/plans/a.md"}), cwd).1, "a.md");
+        assert_eq!(describe("Unknown", &json!({"n": 1, "name": "x"}), cwd), ("Unknown".into(), "x".into()));
     }
 
     #[test]

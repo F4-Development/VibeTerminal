@@ -162,7 +162,7 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             }
             let offset = cards_offset(cards, app.selected);
             let index = card_at(cards, offset, column, row).filter(|&i| i < app.sessions.len())?;
-            if !app.sessions[index].permissions.is_empty() {
+            if app.sessions[index].pending_permission().is_some_and(|r| !r.is_question()) {
                 let [yes, no] = card_buttons(cards, offset, index);
                 if contains(yes, column, row) {
                     return Some(Target::Permit(index, Decision::Allow));
@@ -179,15 +179,22 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
 const PERMIT_BUTTONS: [(&str, Decision); 2] = [(" ✓ Разрешить ", Decision::Allow), (" ✕ Отклонить ", Decision::Deny)];
 const CARD_YES: &str = "✓ Да";
 const CARD_NO: &str = "✕ Нет";
+/// На вопрос отвечают в самой сессии — кнопка просто открывает её.
+const CARD_ANSWER: &str = "→ Ответить";
 
 /// Нижняя строка, пока Claude в открытой сессии ждёт разрешения: что он
 /// просит и кнопки. Окно Claude не закрываем — там его родной диалог.
 pub struct PermitBar {
     /// Какая сессия просит — чтобы было понятно, из какого чата запрос.
     pub session: String,
+    pub mark: &'static str,
     pub text: String,
     pub buttons: Vec<(Rect, &'static str, Decision)>,
+    /// Подсказка справа вместо кнопок: на вопросы отвечают в окне Claude.
+    pub hint: Option<(Rect, &'static str)>,
 }
+
+const QUESTION_HINT: &str = "ответь в окне выше ";
 
 pub fn permit_bar(app: &App) -> Option<PermitBar> {
     let session = app.current()?;
@@ -195,6 +202,17 @@ pub fn permit_bar(app: &App) -> Option<PermitBar> {
     let (what, detail) = hooks::describe(&request.tool, &request.input, &session.cwd);
     let detail = detail.lines().next().unwrap_or_default();
     let bottom = app.areas.bottom;
+    if request.is_question() {
+        let w = width(QUESTION_HINT);
+        let hint = Rect::new(bottom.right().saturating_sub(w), bottom.y, w, 1);
+        return Some(PermitBar {
+            session: session.name.clone(),
+            mark: " ? ",
+            text: format!(" {what}: {detail}"),
+            buttons: Vec::new(),
+            hint: Some((hint, QUESTION_HINT)),
+        });
+    }
     let mut x = bottom.right();
     let mut buttons = Vec::new();
     for (label, decision) in PERMIT_BUTTONS.iter().rev() {
@@ -203,7 +221,13 @@ pub fn permit_bar(app: &App) -> Option<PermitBar> {
         buttons.push((Rect::new(x, bottom.y, w, 1), *label, *decision));
     }
     buttons.reverse();
-    Some(PermitBar { session: session.name.clone(), text: format!(" просит: {what}: {detail}"), buttons })
+    Some(PermitBar {
+        session: session.name.clone(),
+        mark: " ! ",
+        text: format!(" просит: {what}: {detail}"),
+        buttons,
+        hint: None,
+    })
 }
 
 /// Кнопки «Да / Нет» в третьей строке карточки ждущей сессии.
@@ -456,12 +480,23 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Line::from(vec![Span::raw("  "), Span::raw(session.name.as_str())])
         };
-        if session.permissions.is_empty() {
+        let Some(request) = session.pending_permission() else {
             let detail = Line::from(Span::styled(format!("  {}", session_detail(session, &app.home)), dim()));
             frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
             continue;
-        }
+        };
         let waiting = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        if request.is_question() {
+            let detail = Line::from(Span::styled("  ? ждёт ответа", waiting));
+            frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
+            let [yes, _] = card_buttons(cards, offset, i);
+            if i != app.selected && yes.bottom() <= cards.bottom() {
+                let style = if hovered(app, Target::Card(i)) { primary() } else { accent() };
+                let button = Rect::new(yes.x, yes.y, width(CARD_ANSWER).min(cards.width.saturating_sub(2)), 1);
+                frame.render_widget(Paragraph::new(Span::styled(CARD_ANSWER, style)), button);
+            }
+            continue;
+        }
         let detail = Line::from(Span::styled("  ! ждёт разрешения", waiting));
         frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
         let [yes, no] = card_buttons(cards, offset, i);
@@ -608,11 +643,12 @@ fn draw_welcome(frame: &mut Frame, app: &App) {
 fn draw_bottom(frame: &mut Frame, app: &App) {
     let area = app.areas.bottom;
     if let Some(bar) = permit_bar(app) {
-        let text_width = bar.buttons.first().map_or(area.width, |(r, _, _)| r.x.saturating_sub(area.x + 1));
+        let right = bar.buttons.first().map(|(r, _, _)| r.x).or(bar.hint.map(|(r, _)| r.x)).unwrap_or(area.right());
+        let text_width = right.saturating_sub(area.x + 1);
         let waiting = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
         let text = Rect::new(area.x, area.y, text_width, 1);
         let line = Line::from(vec![
-            Span::styled(" ! ", waiting),
+            Span::styled(bar.mark, waiting),
             Span::styled(bar.session.as_str(), primary()),
             Span::styled(bar.text.as_str(), waiting),
         ]);
@@ -621,6 +657,9 @@ fn draw_bottom(frame: &mut Frame, app: &App) {
             let hover = hovered(app, Target::Permit(app.selected, *decision));
             let style = if hover || *decision == Decision::Allow { primary() } else { bold() };
             frame.render_widget(Paragraph::new(Span::styled(*label, style)), *rect);
+        }
+        if let Some((rect, hint)) = bar.hint {
+            frame.render_widget(Paragraph::new(Span::styled(hint, dim())), rect);
         }
         return;
     }
