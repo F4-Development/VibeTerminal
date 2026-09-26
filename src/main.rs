@@ -10,6 +10,7 @@ mod mouse;
 mod picker;
 mod session;
 mod settings;
+mod status;
 mod ui;
 mod userenv;
 mod view;

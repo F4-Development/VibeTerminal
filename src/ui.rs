@@ -15,6 +15,7 @@ use crate::hooks::{self, Decision};
 use crate::menu::{self, Action, MenuItem};
 use crate::picker::{Picker, display_path};
 use crate::session::Session;
+use crate::status::{self, State};
 use crate::view;
 
 /// Цвет Claude — работает и в тёмной, и в светлой теме терминала.
@@ -112,6 +113,8 @@ pub enum Target {
     Ci,
     /// Что-то в окнах git.
     Git(GitTarget),
+    /// «Ждут тебя» внизу.
+    NextWaiting,
 }
 
 /// Что под мышью. Пока открыто окно, кликается только оно.
@@ -143,6 +146,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             }
             if ci_badge(app).is_some_and(|(_, _, r)| contains(r, column, row)) {
                 return Some(Target::Ci);
+            }
+            if permit_bar(app).is_none() && waiting_button(app).is_some_and(|(r, _)| contains(r, column, row)) {
+                return Some(Target::NextWaiting);
             }
             if let Some(bar) = permit_bar(app) {
                 if let Some((_, _, decision)) = bar.buttons.iter().find(|(r, _, _)| contains(*r, column, row)) {
@@ -385,7 +391,8 @@ fn session_detail(session: &Session, home: &Path) -> String {
     if text.is_empty() || text == "Claude Code" {
         display_path(&session.cwd, home)
     } else {
-        title.to_string()
+        // Без значка Claude в начале: статус и так виден справа.
+        text.to_string()
     }
 }
 
@@ -480,35 +487,90 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Line::from(vec![Span::raw("  "), Span::raw(session.name.as_str())])
         };
-        let Some(request) = session.pending_permission() else {
-            let detail = Line::from(Span::styled(format!("  {}", session_detail(session, &app.home)), dim()));
-            frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
+        // Первая строка: имя слева, статус и время справа.
+        let mut name_width = cards.width;
+        if let Some((label, style)) = card_status(session) {
+            let w = width(&label).min(cards.width);
+            let x = cards.right().saturating_sub(w + 1);
+            name_width = x.saturating_sub(cards.x + 1);
+            frame.render_widget(Paragraph::new(Span::styled(label, style)), Rect::new(x, y, w, 1));
+        }
+        frame.render_widget(Paragraph::new(name), Rect::new(cards.x, y, name_width, 1));
+        let (detail, style) = card_detail(session, &app.home);
+        frame.render_widget(Paragraph::new(Span::styled(format!("  {detail}"), style)), Rect::new(cards.x, y + 1, cards.width, 1));
+
+        let Some(request) = session.pending_permission() else { continue };
+        let [yes, no] = card_buttons(cards, offset, i);
+        if yes.bottom() > cards.bottom() {
             continue;
-        };
-        let waiting = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        }
         if request.is_question() {
-            let detail = Line::from(Span::styled("  ? ждёт ответа", waiting));
-            frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
-            let [yes, _] = card_buttons(cards, offset, i);
-            if i != app.selected && yes.bottom() <= cards.bottom() {
+            if i != app.selected {
                 let style = if hovered(app, Target::Card(i)) { primary() } else { accent() };
                 let button = Rect::new(yes.x, yes.y, width(CARD_ANSWER).min(cards.width.saturating_sub(2)), 1);
                 frame.render_widget(Paragraph::new(Span::styled(CARD_ANSWER, style)), button);
             }
             continue;
         }
-        let detail = Line::from(Span::styled("  ! ждёт разрешения", waiting));
-        frame.render_widget(Paragraph::new(vec![name, detail]), Rect::new(cards.x, y, cards.width, 2));
-        let [yes, no] = card_buttons(cards, offset, i);
-        if yes.bottom() <= cards.bottom() {
-            let yes_style = if hovered(app, Target::Permit(i, Decision::Allow)) { primary() } else { accent() };
-            let no_style = if hovered(app, Target::Permit(i, Decision::Deny)) { primary() } else { bold() };
-            frame.render_widget(Paragraph::new(Span::styled(CARD_YES, yes_style)), yes);
-            frame.render_widget(Paragraph::new(Span::styled(CARD_NO, no_style)), no);
-        }
+        let yes_style = if hovered(app, Target::Permit(i, Decision::Allow)) { primary() } else { accent() };
+        let no_style = if hovered(app, Target::Permit(i, Decision::Deny)) { primary() } else { bold() };
+        frame.render_widget(Paragraph::new(Span::styled(CARD_YES, yes_style)), yes);
+        frame.render_widget(Paragraph::new(Span::styled(CARD_NO, no_style)), no);
     }
     let style = if hovered(app, Target::NewSession) { primary() } else { accent() };
     frame.render_widget(Paragraph::new(Span::styled(NEW_BUTTON, style)), button);
+}
+
+/// Значок и время в статусе: «● 12с», «! 3м», «✓ 1ч», «○».
+fn card_status(session: &Session) -> Option<(String, Style)> {
+    if session.is_command {
+        return None;
+    }
+    if let Some(first) = session.permissions.front() {
+        return Some((format!("! {}", status::elapsed(first.at)), waiting()));
+    }
+    let (icon, style) = match session.status.state {
+        State::Idle => return Some(("○".into(), dim())),
+        State::Working => ("●", Style::new().fg(ACCENT)),
+        State::Done => ("✓", Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        State::Failed => ("✕", Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)),
+    };
+    Some((format!("{icon} {}", status::elapsed(session.status.since)), style))
+}
+
+/// Вторая строка карточки: что просит, что делает, чем закончил.
+fn card_detail(session: &Session, home: &Path) -> (String, Style) {
+    if let Some(request) = session.pending_permission() {
+        return (hooks::action(&request.tool, &request.input, &session.cwd), waiting());
+    }
+    let status = &session.status;
+    match status.state {
+        _ if session.is_command => (session_detail(session, home), dim()),
+        State::Working if status.detail.is_empty() => ("думает…".into(), Style::new()),
+        State::Done if status.detail.is_empty() => ("закончил".into(), Style::new()),
+        State::Working | State::Done => (status.detail.clone(), Style::new()),
+        State::Failed => (status.detail.clone(), Style::new().fg(Color::Red)),
+        State::Idle if !status.detail.is_empty() => (status.detail.clone(), dim()),
+        State::Idle => (session_detail(session, home), dim()),
+    }
+}
+
+fn waiting() -> Style {
+    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+}
+
+/// «→ Ждут тебя: 2» справа внизу — ведёт к следующей такой сессии.
+pub fn waiting_button(app: &App) -> Option<(Rect, String)> {
+    let count = status::queue(&app.sessions, app.selected).len();
+    if count == 0 {
+        return None;
+    }
+    let label = format!("→ Ждут тебя: {count} ");
+    let area = app.areas.bottom;
+    let w = width(&label);
+    let used = bottom_buttons(&app.areas, !app.sessions.is_empty()).last().map_or(area.x, |b| b.rect.right());
+    let x = area.right().checked_sub(w)?;
+    (x > used + 1).then(|| (Rect::new(x, area.y, w, 1), label))
 }
 
 fn draw_agent(frame: &mut Frame, app: &App) {
@@ -677,12 +739,19 @@ fn draw_bottom(frame: &mut Frame, app: &App) {
         let scrolled = app.current().map_or(0, Session::scrollback);
         (scrolled > 0).then(|| format!("↑ история, {scrolled} строк вверх · любая клавиша — вниз"))
     });
+    let waiting_at = waiting_button(app).map(|(rect, label)| {
+        let style = if hovered(app, Target::NextWaiting) { primary() } else { waiting() };
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        rect.x.saturating_sub(2)
+    });
     if let Some(note) = note {
+        let right = waiting_at.unwrap_or(area.right());
         let used = buttons.last().map_or(area.x, |b| b.rect.right());
-        let free = area.right().saturating_sub(used + 2);
+        let free = right.saturating_sub(used + 2);
         if width(&note) <= free {
             let line = Line::from(Span::styled(format!("{note} "), Style::new().fg(Color::Yellow)));
-            frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
+            let rect = Rect::new(area.x, area.y, right.saturating_sub(area.x), 1);
+            frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), rect);
         }
     }
 }

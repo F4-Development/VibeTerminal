@@ -13,6 +13,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use crate::ci::CiState;
 use crate::git::RepoStatus;
 use crate::hooks::{self, Decision, HookEvent, PermissionRequest};
+use crate::status::{State, Status};
 
 const SCROLLBACK_LINES: usize = 10_000;
 /// Дольше этого не ждём конца кадра, даже если программа его не закрыла.
@@ -80,6 +81,8 @@ pub struct Session {
     pub ci_due: Option<Instant>,
     /// Сессия-команда (вход, установка), а не Claude.
     pub is_command: bool,
+    /// Работает, готово, прервали — по событиям Claude.
+    pub status: Status,
     parser: vt100::Parser<Term>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -189,6 +192,7 @@ impl Session {
             ci_refreshing: false,
             ci_due: None,
             is_command: matches!(program, Program::Command(_)),
+            status: Status::default(),
             parser: vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, Term::default()),
             master: pty.master,
             writer,
@@ -230,6 +234,16 @@ impl Session {
         (!left.is_zero()).then_some(left)
     }
 
+    /// На карточке идут секунды — перерисовывать почаще.
+    pub fn ticking(&self) -> bool {
+        let since = match self.permissions.front() {
+            Some(request) => request.at,
+            None if self.status.state != State::Idle => self.status.since,
+            None => return false,
+        };
+        since.elapsed() < Duration::from_secs(60)
+    }
+
     /// Запрос, который сейчас показываем: самый свежий.
     pub fn pending_permission(&self) -> Option<&PermissionRequest> {
         self.permissions.back()
@@ -241,14 +255,20 @@ impl Session {
     pub fn resolve_permissions(&mut self, event: &HookEvent) -> bool {
         let before = self.permissions.len();
         let answered: Vec<PermissionRequest> = match event.name.as_str() {
-            "Stop" | "UserPromptSubmit" => self.permissions.drain(..).collect(),
-            _ => {
-                let (done, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.permissions)
-                    .into_iter()
-                    .partition(|r| r.tool_use_id.is_some() && r.tool_use_id == event.tool_use_id);
+            "Stop" | "StopFailure" | "UserPromptSubmit" => self.permissions.drain(..).collect(),
+            "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
+                // В запросе разрешения Claude не присылает номер вызова —
+                // узнаём его по инструменту и тому, что он получил.
+                let same = |r: &PermissionRequest| match (&r.tool_use_id, &event.tool_use_id) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => r.tool == event.tool && r.input == event.input,
+                };
+                let (done, waiting): (Vec<_>, Vec<_>) =
+                    std::mem::take(&mut self.permissions).into_iter().partition(|r| same(r));
                 self.permissions = waiting.into();
                 done
             }
+            _ => Vec::new(),
         };
         // Хуку отвечаем пусто: Claude уже решил сам, пусть хук просто закроется.
         for request in answered {
@@ -304,6 +324,10 @@ impl Session {
 
     /// То, что нажал или вставил человек.
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        // Esc или Ctrl-C — Claude, скорее всего, остановили.
+        if bytes == b"\x1b" || bytes == b"\x03" {
+            self.status.interrupt();
+        }
         if !self.permissions.is_empty() {
             if self.prompt_visible() == Some(true) {
                 self.prompt.seen = true;

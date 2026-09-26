@@ -27,6 +27,7 @@ use signal_hook::iterator::Signals;
 use crate::menu::{self, Action};
 use crate::picker::Picker;
 use crate::session::{self, Launch, Program, Session, SessionId};
+use crate::status;
 use crate::settings::Settings;
 use crate::caps::Caps;
 use crate::ci::{self, CiState, Job};
@@ -50,6 +51,8 @@ const SETTLE: Duration = Duration::from_millis(4);
 const FLASH_FOR: Duration = Duration::from_secs(5);
 /// Как часто обновлять ветку и изменения в шапке.
 const GIT_TICK: Duration = Duration::from_secs(3);
+/// Пока на карточках идут секунды — перерисовывать так часто.
+const STATUS_TICK: Duration = Duration::from_secs(1);
 /// Fetch при открытии сессии — не чаще этого.
 const FETCH_EVERY: Duration = Duration::from_secs(120);
 
@@ -129,6 +132,9 @@ pub struct App {
     window_title: String,
     /// Закрытые сессии, которые ещё гасятся в фоне.
     stopping: Vec<JoinHandle<()>>,
+    /// Окно VibeTerminal сейчас в фокусе: открытую сессию ты видишь.
+    focused: bool,
+    last_git_tick: Instant,
     quit: bool,
 }
 
@@ -167,6 +173,8 @@ pub fn run() -> Result<()> {
         pointer: "",
         cursor_shape: 0,
         window_title: String::new(),
+        focused: true,
+        last_git_tick: Instant::now(),
         stopping: Vec::new(),
         quit: false,
     };
@@ -211,6 +219,10 @@ impl App {
     fn run_loop(&mut self, terminal: &mut Screen, rx: &Receiver<Event>) -> Result<()> {
         let mut dirty = true;
         while !self.quit {
+            // После Esc Claude замолчал — сессия больше не «работает».
+            for session in &mut self.sessions {
+                dirty |= session.status.settle();
+            }
             let hold = self.current().and_then(Session::frame_hold);
             if dirty && hold.is_none() {
                 self.draw(terminal)?;
@@ -218,16 +230,20 @@ impl App {
             }
             // Если висит сообщение, проснуться, чтобы его убрать.
             // Просыпаемся дорисовать кадр, убрать сообщение или обновить git.
+            let tick = if self.sessions.iter().any(Session::ticking) { STATUS_TICK } else { GIT_TICK };
             let wake = match (dirty, self.flash()) {
                 (true, _) => hold.unwrap_or(FRAME),
-                (false, Some(_)) => FLASH_FOR.min(GIT_TICK),
-                (false, None) => GIT_TICK,
+                (false, Some(_)) => FLASH_FOR.min(tick),
+                (false, None) => tick,
             };
             let event = match rx.recv_timeout(wake) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
-                    self.refresh_git(self.selected);
-                    self.refresh_ci_if_due(self.selected);
+                    if self.last_git_tick.elapsed() >= GIT_TICK {
+                        self.last_git_tick = Instant::now();
+                        self.refresh_git(self.selected);
+                        self.refresh_ci_if_due(self.selected);
+                    }
                     dirty = true;
                     continue;
                 }
@@ -321,8 +337,14 @@ impl App {
             Event::Hook(id, event) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
                 // Claude что-то поменял — пересчитать изменения в шапке.
-                self.refresh_git(index);
-                Ok(self.sessions[index].resolve_permissions(&event))
+                if event.name != "PreToolUse" {
+                    self.refresh_git(index);
+                }
+                let session = &mut self.sessions[index];
+                let resolved = session.resolve_permissions(&event);
+                let changed = session.status.on_event(&event, &session.cwd);
+                self.mark_seen();
+                Ok(resolved || changed)
             }
             Event::GitStatus(id, status) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
@@ -422,8 +444,9 @@ impl App {
             Event::Term(TermEvent::Mouse(mouse)) => self.on_mouse(mouse, terminal.backend_mut()),
             Event::Term(TermEvent::FocusGained | TermEvent::FocusLost) => {
                 let gained = matches!(event, Event::Term(TermEvent::FocusGained));
+                self.focused = gained;
                 self.send_focus(self.selected, gained)?;
-                Ok(false)
+                Ok(self.mark_seen())
             }
             Event::Term(TermEvent::Resize(width, height)) => {
                 self.relayout(Rect::new(0, 0, width, height))?;
@@ -529,6 +552,11 @@ impl App {
             Action::Quit if self.sessions.is_empty() => self.quit = true,
             Action::Quit => self.overlay = Overlay::Confirm(Confirm::Quit),
             Action::Help => self.overlay = Overlay::Help,
+            Action::NextWaiting => {
+                if let Some(&index) = status::queue(&self.sessions, self.selected).first() {
+                    self.select(index)?;
+                }
+            }
             Action::Git => self.open_git_menu(),
             Action::Settings => {
                 if let Err(err) = Settings::open(&self.home) {
@@ -676,6 +704,7 @@ impl App {
             }
             Target::NewSession => self.perform(Action::New)?,
             Target::Card(index) => self.select(index)?,
+            Target::NextWaiting => self.perform(Action::NextWaiting)?,
             Target::Bottom(action) => self.perform(action)?,
             Target::MenuItem(index) => {
                 let items = menu::items(&self.sessions, self.selected, self.areas.sidebar.is_some());
@@ -785,9 +814,16 @@ impl App {
             self.send_focus(self.selected, false)?;
         }
         self.selected = index;
+        self.mark_seen();
         self.refresh_git(index);
         self.fetch_if_stale(index);
         self.send_focus(index, true)
+    }
+
+    /// Открытую сессию ты видишь — её «готово» прочитано.
+    fn mark_seen(&mut self) -> bool {
+        let focused = self.focused;
+        self.current_mut().is_some_and(|session| focused && session.status.seen())
     }
 
     /// Узнать ветку и изменения в фоне; ответ придёт событием.

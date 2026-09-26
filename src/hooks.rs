@@ -14,12 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::app::Event;
 use crate::session::SessionId;
+use crate::status;
 
 /// Сколько Claude ждёт ответа на запрос разрешения: сутки — ты мог уйти.
 const PERMISSION_TIMEOUT_SECS: u64 = 24 * 60 * 60;
@@ -37,6 +39,8 @@ pub struct PermissionRequest {
     pub tool_use_id: Option<String>,
     pub tool: String,
     pub input: Value,
+    /// Когда пришёл: кто дольше ждёт — первым в очереди.
+    pub at: Instant,
     reply: Sender<Reply>,
 }
 
@@ -80,12 +84,30 @@ fn decision_json(decision: Decision) -> String {
 }
 
 /// События Claude, о которых vv просто узнаёт: Claude их не ждёт.
-const NOTIFY_EVENTS: [&str; 5] = ["PostToolUse", "PostToolUseFailure", "PermissionDenied", "Stop", "UserPromptSubmit"];
+const NOTIFY_EVENTS: [&str; 7] = [
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionDenied",
+    "Stop",
+    "StopFailure",
+];
 
 /// Что Claude сообщил о своих делах.
+#[derive(Default)]
 pub struct HookEvent {
     pub name: String,
     pub tool_use_id: Option<String>,
+    pub tool: String,
+    pub input: Value,
+    /// Последний ответ Claude (Stop, StopFailure).
+    pub message: String,
+    /// Почему ход оборвался (StopFailure): `rate_limit`, `overloaded`…
+    pub error: String,
+    /// Когда запустился хук, мс от начала эпохи. Хуки асинхронные и
+    /// приходят не по порядку — по этому времени старые пропускаем.
+    pub at: u64,
 }
 
 /// Настройки для `claude --settings`: наши хуки только для этой сессии,
@@ -150,8 +172,17 @@ fn serve(stream: UnixStream, tx: Sender<Event>) {
     match message["event"].as_str() {
         Some("permission") => {}
         Some("event") => {
-            let name = payload["hook_event_name"].as_str().unwrap_or_default().to_string();
-            let _ = tx.send(Event::Hook(session as SessionId, HookEvent { name, tool_use_id }));
+            let text = |key: &str| payload[key].as_str().unwrap_or_default().to_string();
+            let event = HookEvent {
+                name: text("hook_event_name"),
+                tool_use_id,
+                tool: text("tool_name"),
+                input: payload["tool_input"].clone(),
+                message: text("last_assistant_message"),
+                error: text("error"),
+                at: message["at"].as_u64().unwrap_or_else(status::now_ms),
+            };
+            let _ = tx.send(Event::Hook(session as SessionId, event));
             return;
         }
         _ => return,
@@ -172,6 +203,7 @@ fn serve(stream: UnixStream, tx: Sender<Event>) {
         tool_use_id,
         tool: payload["tool_name"].as_str().unwrap_or("?").to_string(),
         input: payload["tool_input"].clone(),
+        at: Instant::now(),
         reply,
     };
     if tx.send(Event::Permission(session as SessionId, request)).is_err() {
@@ -202,7 +234,7 @@ fn try_run_hook(event: &str) -> Result<()> {
     let payload: Value = serde_json::from_str(&input)?;
 
     let mut stream = UnixStream::connect(socket)?;
-    let message = json!({ "session": session, "event": event, "payload": payload });
+    let message = json!({ "session": session, "event": event, "at": status::now_ms(), "payload": payload });
     // Соединение держим открытым до ответа: если Claude убьёт хук, vv это заметит.
     stream.write_all(format!("{message}\n").as_bytes())?;
     if event != "permission" {
@@ -217,10 +249,7 @@ fn try_run_hook(event: &str) -> Result<()> {
 /// Что просит Claude, по-человечески: «Выполнить команду» и сама команда.
 pub fn describe(tool: &str, input: &Value, cwd: &Path) -> (String, String) {
     let text = |key: &str| input[key].as_str().unwrap_or_default().to_string();
-    let path = |key: &str| {
-        let raw = text(key);
-        Path::new(&raw).strip_prefix(cwd).map(|p| p.display().to_string()).unwrap_or(raw)
-    };
+    let path = |key: &str| relative(&text(key), cwd);
     let (what, detail) = match tool {
         "Bash" => ("Выполнить команду", format!("$ {}", text("command"))),
         "Edit" | "MultiEdit" => ("Изменить файл", path("file_path")),
@@ -243,6 +272,47 @@ pub fn describe(tool: &str, input: &Value, cwd: &Path) -> (String, String) {
         _ => return (tool.to_string(), first_text(input)),
     };
     (what.to_string(), detail)
+}
+
+/// Что Claude делает, коротко — для второй строки карточки.
+pub fn action(tool: &str, input: &Value, cwd: &Path) -> String {
+    let text = |key: &str| input[key].as_str().unwrap_or_default().lines().next().unwrap_or_default().to_string();
+    let path = |key: &str| relative(&text(key), cwd);
+    match tool {
+        "Bash" => format!("$ {}", text("command")),
+        "Read" => format!("Читает {}", path("file_path")),
+        "Edit" | "MultiEdit" => format!("Правит {}", path("file_path")),
+        "Write" => format!("Пишет {}", path("file_path")),
+        "NotebookEdit" => format!("Правит {}", path("notebook_path")),
+        "Glob" | "Grep" => format!("Ищет {}", text("pattern")),
+        "WebFetch" => format!("Открывает {}", domain(&text("url"))),
+        "WebSearch" => format!("Ищет в сети: {}", text("query")),
+        "Task" | "Agent" => format!("Помощник: {}", text("description")),
+        "Skill" => format!("Навык {}", text("skill")),
+        "AskUserQuestion" => format!("? {}", question(input)),
+        "ExitPlanMode" => format!("План: {}", plan_title(input)),
+        "TodoWrite" => input["todos"]
+            .as_array()
+            .and_then(|todos| todos.iter().find(|t| t["status"] == "in_progress"))
+            .and_then(|t| t["activeForm"].as_str())
+            .map_or_else(|| "Обновляет список задач".to_string(), str::to_string),
+        _ if tool.starts_with("mcp__") => {
+            let mut parts = tool.splitn(3, "__").skip(1);
+            format!("{}:{}", parts.next().unwrap_or_default(), parts.next().unwrap_or_default())
+        }
+        _ => tool.to_string(),
+    }
+}
+
+/// Путь от корня проекта, если файл внутри него.
+fn relative(raw: &str, cwd: &Path) -> String {
+    Path::new(raw).strip_prefix(cwd).map_or_else(|_| raw.to_string(), |p| p.display().to_string())
+}
+
+/// `https://docs.rs/serde/` → `docs.rs`.
+fn domain(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split('/').next().unwrap_or_default().to_string()
 }
 
 /// Первый вопрос; если их несколько — сколько всего.
@@ -297,6 +367,18 @@ mod tests {
         let stop = &settings["hooks"]["Stop"][0]["hooks"][0];
         assert_eq!(stop["args"], json!(["hook", "event"]));
         assert_eq!(stop["async"], true);
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["async"], true);
+    }
+
+    #[test]
+    fn describes_current_action() {
+        let cwd = Path::new("/p");
+        assert_eq!(action("Bash", &json!({"command": "npm test\nnpm run lint"}), cwd), "$ npm test");
+        assert_eq!(action("Edit", &json!({"file_path": "/p/src/a.rs"}), cwd), "Правит src/a.rs");
+        assert_eq!(action("WebFetch", &json!({"url": "https://docs.rs/serde/latest"}), cwd), "Открывает docs.rs");
+        assert_eq!(action("mcp__figma__use_figma", &json!({}), cwd), "figma:use_figma");
+        let todos = json!({"todos": [{"status": "completed", "activeForm": "A"}, {"status": "in_progress", "activeForm": "Гоняю тесты"}]});
+        assert_eq!(action("TodoWrite", &todos, cwd), "Гоняю тесты");
     }
 
     #[test]
