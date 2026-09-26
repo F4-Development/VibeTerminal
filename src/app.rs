@@ -104,6 +104,8 @@ pub struct App {
     pointer: &'static str,
     /// Какая форма текстового курсора выставлена в терминале.
     cursor_shape: u16,
+    /// Заголовок окна терминала: имя открытой сессии.
+    window_title: String,
     /// Закрытые сессии, которые ещё гасятся в фоне.
     stopping: Vec<JoinHandle<()>>,
     quit: bool,
@@ -119,7 +121,7 @@ pub fn run() -> Result<()> {
     let caps = Caps::detect();
     POINTER_SHAPES.store(caps.pointer_shape, Ordering::Relaxed);
     // Сокет живёт, пока живёт окно, и убирается при выходе.
-    let hooks = HookServer::start(&home.join(".vibevim/run"), tx.clone())?;
+    let hooks = HookServer::start(&home.join(".vibeterminal/run"), tx.clone())?;
     let launch = Launch {
         truecolor: caps.truecolor,
         socket: hooks.path.clone(),
@@ -145,6 +147,7 @@ pub fn run() -> Result<()> {
         hover: None,
         pointer: "",
         cursor_shape: 0,
+        window_title: String::new(),
         stopping: Vec::new(),
         quit: false,
         exit_note: None,
@@ -233,6 +236,11 @@ impl App {
         let this = &*self;
         terminal.draw(|frame| ui::draw(frame, this))?;
         let out = terminal.backend_mut();
+        let title = format!("{} — VibeTerminal", self.current().name);
+        if title != self.window_title {
+            write!(out, "\x1b]0;{title}\x07")?;
+            self.window_title = title;
+        }
         let shape = self.current().cursor_style().unwrap_or(CURSOR_BAR);
         if shape != self.cursor_shape {
             write!(out, "\x1b[{shape} q")?;

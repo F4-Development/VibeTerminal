@@ -7,10 +7,11 @@ mod mouse;
 mod picker;
 mod session;
 mod ui;
+mod userenv;
 mod view;
 
 const HELP: &str = "\
-vv — Vibe Vim, терминальный пульт для вайбкодинга
+vv — VibeTerminal, терминальный пульт для вайбкодинга
 
 Использование:
   vv              открыть Claude в текущей папке
@@ -36,5 +37,6 @@ fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    userenv::ensure_path();
     app::run()
 }

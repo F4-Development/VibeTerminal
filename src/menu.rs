@@ -42,7 +42,7 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
         ("✕", "Закрыть сессию", 'x', Action::Close),
         ("◧", sidebar_label, 'z', Action::ToggleSidebar),
         ("?", "Как пользоваться", '?', Action::Help),
-        ("↪", "Выйти из Vibe Vim", 'q', Action::Quit),
+        ("↪", "Выйти из VibeTerminal", 'q', Action::Quit),
     ];
     for (i, (icon, label, key, action)) in actions.into_iter().enumerate() {
         items.push(MenuItem { icon, label: label.to_string(), hotkey: Some(key), action, gap_before: i == 0 });

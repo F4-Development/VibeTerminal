@@ -1,8 +1,8 @@
 [package]
-name = "vibevim"
+name = "vibeterminal"
 version = "0.1.0"
 edition = "2024"
-description = "Vibe Vim — терминальный пульт для вайбкодинга с Claude Code"
+description = "VibeTerminal — терминальный пульт для вайбкодинга с Claude Code"
 
 [[bin]]
 name = "vv"

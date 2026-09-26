@@ -23,7 +23,7 @@ use crate::session::SessionId;
 
 /// Сколько Claude ждёт ответа на запрос разрешения: сутки — ты мог уйти.
 const PERMISSION_TIMEOUT_SECS: u64 = 24 * 60 * 60;
-const DENY_MESSAGE: &str = "Пользователь отклонил это действие в Vibe Vim.";
+const DENY_MESSAGE: &str = "Пользователь отклонил это действие в VibeTerminal.";
 
 pub const ENV_SOCKET: &str = "VV_SOCK";
 pub const ENV_SESSION: &str = "VV_SESSION";

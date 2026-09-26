@@ -381,7 +381,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let (title, text) = match confirm {
                 Confirm::Close => (" Закрыть сессию? ", format!("Claude в «{}» остановится.", app.current().name)),
                 Confirm::Quit => (
-                    " Выйти из Vibe Vim? ",
+                    " Выйти из VibeTerminal? ",
                     match app.sessions.len() {
                         1 => "Claude остановится.".to_string(),
                         n => format!("Остановятся все Claude: {n}."),
@@ -396,7 +396,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_top(frame: &mut Frame, app: &App) {
     let area = app.areas.top;
-    let logo = Span::styled(" ✻ Vibe Vim ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
+    // Как на иконке: чёрный «>» и оранжевая «~».
+    let logo = Line::from(vec![
+        Span::styled(" >", Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled("~", accent()),
+        Span::styled(" VibeTerminal ", Style::new().add_modifier(Modifier::BOLD)),
+    ]);
     frame.render_widget(Paragraph::new(logo), area);
     let open = matches!(app.overlay, Overlay::Menu(_));
     let button = if open || hovered(app, Target::MenuButton) {

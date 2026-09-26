@@ -104,7 +104,7 @@ impl Session {
         } else {
             cmd.env_remove("COLORTERM");
         }
-        cmd.env("TERM_PROGRAM", "vibevim");
+        cmd.env("TERM_PROGRAM", "vibeterminal");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         cmd.env(hooks::ENV_SESSION, id.to_string());
         cmd.env(hooks::ENV_SOCKET, &launch.socket);
