@@ -68,6 +68,23 @@ fn key_bytes(name: &str) -> Vec<u8> {
     }
 }
 
+/// vv запоминает свои сессии в ~/.vibeterminal — тестовые не должны
+/// всплыть в настоящем VibeTerminal после перезапуска. `DRIVE_KEEP_STATE=1` —
+/// оставить (для проверки восстановления).
+struct Cleanup(u32);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if std::env::var_os("DRIVE_KEEP_STATE").is_some() {
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME") else { return };
+        let base = std::path::PathBuf::from(home).join(".vibeterminal");
+        let _ = std::fs::remove_file(base.join(format!("sessions/{}.json", self.0)));
+        let _ = std::fs::remove_file(base.join(format!("run/{}.sock", self.0)));
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = args.next().expect("папка");
@@ -86,6 +103,7 @@ fn main() {
     cmd.env("TERM", "xterm-256color");
     let mut child = pty.slave.spawn_command(cmd).unwrap();
     let vv_pid = child.process_id().unwrap();
+    let _cleanup = Cleanup(vv_pid);
     drop(pty.slave);
 
     let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(rows, cols, 0, Replies::default())));

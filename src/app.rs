@@ -253,7 +253,9 @@ pub fn run() -> Result<()> {
     // Из терминала в папке проекта — сразу Claude там.
     let from_dock = cwd == app.home || cwd == Path::new("/");
     let adopted = handoff.is_some_and(|handoff| app.adopt(handoff));
-    let restored = adopted || (from_dock && saved::claim(&app.home).is_some_and(|window| app.restore(window)));
+    // Сохранение, где нечего вернуть (папки уже нет), не мешает следующему.
+    let home = app.home.clone();
+    let restored = adopted || (from_dock && std::iter::from_fn(|| saved::claim(&home)).any(|window| app.restore(window)));
     let started = if restored {
         Ok(())
     } else if from_dock {
