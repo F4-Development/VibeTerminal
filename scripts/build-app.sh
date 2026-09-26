@@ -24,6 +24,14 @@ cp "$ROOT/target/release/vv" "$OUT/Contents/MacOS/vv"
 # (Ghostty). Меняем в готовом приложении, чтобы не трогать сборку Ghostty.
 /usr/libexec/PlistBuddy -c "Set :CFBundleName VibeTerminal" "$OUT/Contents/Info.plist"
 
+# Версия одна на приложение и vv — из Cargo.toml. По ней приложение
+# сравнивает себя с последним релизом на GitHub. Номер сборки — число
+# коммитов: растёт с каждой версией.
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+BUILD="$(git -C "$ROOT" rev-list --count HEAD)"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$OUT/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$OUT/Contents/Info.plist"
+
 # Приложение русскоязычное: системные пункты меню и окна macOS — по-русски,
 # тексты запросов доступа (микрофон и т.п.) — из assets/app/ru.lproj.
 PLIST="$OUT/Contents/Info.plist"
@@ -38,7 +46,7 @@ cp -R "$ROOT/assets/app/ru.lproj" "$OUT/Contents/Resources/"
 codesign --force --sign - "$OUT/Contents/MacOS/vv"
 codesign --force --sign - --preserve-metadata=entitlements,requirements,flags,runtime "$OUT"
 codesign --verify --deep --strict "$OUT"
-echo "готово: $OUT"
+echo "готово: $OUT ($VERSION, сборка $BUILD)"
 
 if [[ "${1:-}" == "--install" ]]; then
     ditto "$OUT" /Applications/VibeTerminal.app

@@ -210,6 +210,8 @@ class AppDelegate: NSObject,
     func applicationDidFinishLaunching(_ notification: Notification) {
         // ⌘⇧Space — голосовой ввод vv (нажатие и отпускание).
         VibeVoiceHotkey.shared.install()
+        // Новая версия на GitHub — окно «Доступно обновление».
+        VibeUpdater.shared.start()
 
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
@@ -384,7 +386,7 @@ class AppDelegate: NSObject,
 
         // If we've already accepted to install an update, then we don't need to
         // confirm quit. The user is already expecting the update to happen.
-        if updateController.isInstalling {
+        if updateController.isInstalling || VibeUpdater.shared.isInstalling {
             return .terminateNow
         }
 
@@ -966,8 +968,8 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func checkForUpdates(_ sender: Any?) {
-        updateController.checkForUpdates()
-        // UpdateSimulator.happyPath.simulate(with: updateViewModel)
+        // VibeTerminal: свои обновления с GitHub вместо Sparkle Ghostty.
+        VibeUpdater.shared.check(manual: true)
     }
 
     @IBAction func newWindow(_ sender: Any?) {

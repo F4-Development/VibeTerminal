@@ -122,6 +122,8 @@ final class VibeAskPanel {
                 self?.finish()
             })
         let host = NSHostingController(rootView: view)
+        // Заголовка не видно — его место не прибавлять к высоте окна.
+        if #available(macOS 13.3, *) { host.safeAreaRegions = [] }
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 440, height: 200),
             styleMask: [.titled, .closable, .nonactivatingPanel, .fullSizeContentView],

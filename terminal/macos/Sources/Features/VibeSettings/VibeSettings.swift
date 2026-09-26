@@ -49,7 +49,7 @@ final class VibeSettingsController: NSWindowController {
 }
 
 enum VibeSettingsTab: String, CaseIterable {
-    case claude, notifications, voice, look
+    case claude, notifications, voice, look, updates
 
     var title: String {
         switch self {
@@ -57,6 +57,7 @@ enum VibeSettingsTab: String, CaseIterable {
         case .notifications: "Уведомления"
         case .voice: "Голос"
         case .look: "Вид"
+        case .updates: "Обновления"
         }
     }
 
@@ -66,6 +67,7 @@ enum VibeSettingsTab: String, CaseIterable {
         case .notifications: "bell.badge"
         case .voice: "mic"
         case .look: "textformat.size"
+        case .updates: "arrow.down.circle"
         }
     }
 
@@ -76,6 +78,7 @@ enum VibeSettingsTab: String, CaseIterable {
         case .notifications: 540
         case .voice: 690
         case .look: 250
+        case .updates: 220
         }
     }
 
@@ -85,6 +88,7 @@ enum VibeSettingsTab: String, CaseIterable {
         case .notifications: AnyView(NotificationSettings())
         case .voice: AnyView(VoiceSettings())
         case .look: AnyView(LookSettings())
+        case .updates: AnyView(UpdateSettings())
         }
     }
 }

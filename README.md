@@ -37,6 +37,16 @@ scripts/dev.sh --watch  # и дальше — при каждом изменен
 
 Открытые окна VibeTerminal сами замечают новую версию `vv` и перезагружаются: сессии с Claude не прерываются, экран остаётся как был. Можно править `vv` прямо из Claude, запущенного в VibeTerminal. Изменения в приложении (Swift, Zig) так не доедут — для них `scripts/build-app.sh --install` и перезапуск.
 
+## Выпуск версии
+
+```sh
+# поднять version в Cargo.toml, закоммитить, запушить main
+scripts/release.sh              # сборка, VibeTerminal-<версия>.zip, релиз v<версия> на GitHub
+scripts/release.sh notes.md     # то же, описание из файла
+```
+
+Нужен `gh auth login`. Установленные VibeTerminal увидят релиз при запуске (и раз в 6 часов) и предложат обновиться в один клик.
+
 ## Лицензии
 
 `terminal/` основан на Ghostty и распространяется по его лицензии MIT (`terminal/LICENSE`).
