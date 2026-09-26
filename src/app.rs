@@ -27,6 +27,7 @@ use signal_hook::iterator::Signals;
 use crate::menu::{self, Action};
 use crate::picker::Picker;
 use crate::session::{self, Launch, Session, SessionId};
+use crate::settings::Settings;
 use crate::caps::Caps;
 use crate::hooks::{Decision, HookEvent, HookServer, PermissionRequest};
 use crate::ui::{self, Areas, Target, contains};
@@ -286,9 +287,11 @@ impl App {
                     let note = format!("«{}» просит разрешение", session.name);
                     self.set_flash(note);
                 }
-                let out = terminal.backend_mut();
-                out.write_all(b"\x07")?;
-                out.flush()?;
+                if Settings::load(&self.home).permission_sound {
+                    let out = terminal.backend_mut();
+                    out.write_all(b"\x07")?;
+                    out.flush()?;
+                }
                 Ok(true)
             }
             Event::PermissionGone(id, request) => {
@@ -599,7 +602,8 @@ impl App {
         let tx = self.tx.clone();
         let area = self.areas.agent;
         let (rows, cols) = (area.height.max(1), area.width.max(1));
-        let session = Session::spawn(id, name, dir, rows, cols, &self.launch, move |chunk| {
+        let args = Settings::load(&self.home).claude_args();
+        let session = Session::spawn(id, name, dir, rows, cols, &self.launch, &args, move |chunk| {
             let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
         })?;
         self.sessions.push(session);

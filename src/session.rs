@@ -74,6 +74,7 @@ impl Session {
         rows: u16,
         cols: u16,
         launch: &Launch,
+        claude_args: &[String],
         on_output: impl Fn(Option<Vec<u8>>) + Send + 'static,
     ) -> Result<Self> {
         let pty = native_pty_system().openpty(pty_size(rows, cols))?;
@@ -88,6 +89,8 @@ impl Session {
             Err(_) => {
                 let mut cmd = CommandBuilder::new("claude");
                 cmd.args(["--settings", &hooks::settings_json(&launch.vv_exe)]);
+                // Модель, режим разрешений и флаги из настроек.
+                cmd.args(claude_args);
                 // VV_CLAUDE_ARGS — дополнительные флаги claude (для отладки).
                 if let Ok(extra) = std::env::var("VV_CLAUDE_ARGS") {
                     cmd.args(extra.split_whitespace());

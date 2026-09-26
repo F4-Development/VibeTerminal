@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::keys;
+use crate::settings::Settings;
 
 pub struct Candidate {
     pub path: PathBuf,
@@ -170,9 +171,11 @@ fn collect(home: &Path) -> Vec<Candidate> {
             out.push(Candidate { display: display_path(&path, home), path, hint: "недавно" });
         }
     }
-    for path in projects_dir(&home.join("Projects")) {
-        if seen.insert(path.clone()) {
-            out.push(Candidate { display: display_path(&path, home), path, hint: "" });
+    for dir in Settings::load(home).projects_dirs(home) {
+        for path in projects_dir(&dir) {
+            if seen.insert(path.clone()) {
+                out.push(Candidate { display: display_path(&path, home), path, hint: "" });
+            }
         }
     }
     out

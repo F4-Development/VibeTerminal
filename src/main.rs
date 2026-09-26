@@ -6,6 +6,7 @@ mod menu;
 mod mouse;
 mod picker;
 mod session;
+mod settings;
 mod ui;
 mod userenv;
 mod view;
