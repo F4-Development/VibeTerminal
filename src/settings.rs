@@ -47,8 +47,10 @@ pub struct Settings {
     pub voice_language: String,
     /// Слова, которые надо узнавать правильно, — подсказка Whisper.
     pub voice_words: String,
-    /// Распознал — сразу отправить Claude, а не только вставить.
-    pub voice_send: bool,
+    /// `press` — нажал, говоришь, Enter; `hold` — говоришь, пока держишь клавишу.
+    pub voice_mode: String,
+    /// `send` — распознанное сразу отправить Claude; `insert` — только вставить в поле.
+    pub voice_after: String,
     /// Имя микрофона; пусто — системный.
     pub voice_device: String,
 }
@@ -70,7 +72,8 @@ impl Default for Settings {
             voice_model: String::new(),
             voice_language: "ru".into(),
             voice_words: String::new(),
-            voice_send: false,
+            voice_mode: "press".into(),
+            voice_after: "send".into(),
             voice_device: String::new(),
         }
     }

@@ -6426,15 +6426,6 @@ pub const Keybinds = struct {
             .{ .open_config = {} },
         );
 
-        // VibeTerminal: ⌘⇧Space — голосовой ввод vv. Сочетания с ⌘ до
-        // программ в терминале не доходят, поэтому отдаём vv служебную
-        // клавишу F13 (CSI 25 ~). Строка раскрывается при нажатии.
-        try self.set.put(
-            alloc,
-            .{ .key = .{ .physical = .space }, .mods = .{ .super = true, .shift = true } },
-            .{ .text = "\\x1b[25~" },
-        );
-
         {
             try self.set.put(
                 alloc,

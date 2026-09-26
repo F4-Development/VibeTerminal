@@ -46,6 +46,8 @@ fn key_bytes(name: &str) -> Vec<u8> {
         "focusin" => b"\x1b[I".to_vec(),
         // Так VibeTerminal отдаёт ⌘⇧Space (голосовой ввод).
         "f13" => b"\x1b[25~".to_vec(),
+        // …и отпускание ⌘⇧Space.
+        "f14" => b"\x1b[26~".to_vec(),
         "focusout" => b"\x1b[O".to_vec(),
         "prefix" => b"\x1c".to_vec(),
         "up" => b"\x1b[A".to_vec(),

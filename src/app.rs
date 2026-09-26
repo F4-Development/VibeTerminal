@@ -137,7 +137,8 @@ pub enum Overlay {
 /// Голосовой ввод в сессию.
 pub enum VoiceState {
     Idle,
-    Recording { session: SessionId, recording: voice::Recording },
+    /// `hint` — что нажать, чтобы закончить: зависит от настроек.
+    Recording { session: SessionId, recording: voice::Recording, hint: &'static str },
     Transcribing { session: SessionId, since: Instant },
 }
 
@@ -462,7 +463,7 @@ impl App {
                 }
                 self.voice = VoiceState::Idle;
                 self.voice_used = Some(Instant::now());
-                let send = Settings::load(&self.home).voice_send;
+                let send = Settings::load(&self.home).voice_after != "insert";
                 match (result, self.index_of(id)) {
                     (Ok(text), Some(index)) => {
                         let session = &mut self.sessions[index];
@@ -643,12 +644,17 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // ⌘⇧Space VibeTerminal отдаёт как F13 (нажали) и F14 (отпустили).
+        let hold = Settings::load(&self.home).voice_mode == "hold";
         // Идёт запись: Enter — распознать, Esc — отменить, остальное не в Claude.
         if matches!(self.voice, VoiceState::Recording { .. }) {
             match key.code {
                 KeyCode::Enter => self.finish_voice(),
                 KeyCode::Esc => self.cancel_voice(),
-                KeyCode::F(13) => self.finish_voice(),
+                // «Нажать и говорить»: второе нажатие — готово.
+                KeyCode::F(13) if !hold => self.finish_voice(),
+                // «Удерживать клавишу»: отпустил — готово.
+                KeyCode::F(14) if hold => self.finish_voice(),
                 _ => {}
             }
             return Ok(true);
@@ -657,10 +663,13 @@ impl App {
             self.cancel_voice();
             return Ok(true);
         }
-        // Горячая клавиша голоса: VibeTerminal отдаёт ⌘⇧Space как F13.
-        if key.code == KeyCode::F(13) && matches!(self.overlay, Overlay::None) {
-            self.start_voice();
-            return Ok(true);
+        match key.code {
+            KeyCode::F(13) if matches!(self.overlay, Overlay::None) => {
+                self.start_voice();
+                return Ok(true);
+            }
+            KeyCode::F(14) => return Ok(false),
+            _ => {}
         }
         if !matches!(self.overlay, Overlay::None) {
             return self.on_overlay_key(key);
@@ -1257,15 +1266,20 @@ impl App {
         };
         // Модель грузится, пока ты говоришь.
         thread::spawn(move || voice::preload(&model));
+        let hint = match (settings.voice_mode.as_str(), settings.voice_after.as_str()) {
+            ("hold", _) => "Отпусти ⌘⇧Space — готово · Esc — отмена ",
+            (_, "insert") => "Enter — вставить в поле · Esc — отмена ",
+            _ => "Enter — отправить · Esc — отмена ",
+        };
         match voice::Recording::start(&settings.voice_device) {
-            Ok(recording) => self.voice = VoiceState::Recording { session: id, recording },
+            Ok(recording) => self.voice = VoiceState::Recording { session: id, recording, hint },
             Err(text) => self.set_flash(format!("Голос: {text}")),
         }
     }
 
     /// Enter: остановить запись и распознать в фоне.
     fn finish_voice(&mut self) {
-        let VoiceState::Recording { session, recording } = std::mem::replace(&mut self.voice, VoiceState::Idle) else {
+        let VoiceState::Recording { session, recording, .. } = std::mem::replace(&mut self.voice, VoiceState::Idle) else {
             return;
         };
         let settings = Settings::load(&self.home);

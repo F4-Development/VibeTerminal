@@ -706,7 +706,8 @@ fn ci_badge(app: &App) -> Option<(String, Style, Rect)> {
 
 // ── Голосовой ввод ───────────────────────────────────────────────────────
 
-const MIC: &str = "🎤";
+/// Микрофон из символов Nerd Font — они встроены в VibeTerminal.
+const MIC: &str = "\u{f130}";
 const EQ_BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// Поле ввода Claude на экране: строки между двумя линиями `───`, первая
@@ -734,13 +735,14 @@ fn input_box(app: &App) -> Option<Rect> {
     (last < agent.height).then(|| Rect::new(agent.x, agent.y + first, agent.width, last - first + 1))
 }
 
-/// Микрофон справа в первой строке поля ввода.
+/// Кнопка микрофона справа в первой строке поля ввода: « » — с полями,
+/// чтобы легко попасть мышью.
 fn mic_rect(app: &App) -> Option<Rect> {
     if !matches!(app.voice, VoiceState::Idle) || !matches!(app.overlay, Overlay::None) {
         return None;
     }
     let field = input_box(app)?;
-    (field.width > 10).then(|| Rect::new(field.right() - 3, field.y, width(MIC), 1))
+    (field.width > 10).then(|| Rect::new(field.right() - 4, field.y, 3, 1))
 }
 
 /// Где идёт запись или распознавание: поле ввода, а не нашлось — нижняя строка.
@@ -756,8 +758,14 @@ fn voice_area(app: &App) -> Option<Rect> {
 fn draw_voice(frame: &mut Frame, app: &App) {
     if let Some(rect) = mic_rect(app) {
         let has_model = !crate::settings::Settings::load(&app.home).voice_model.is_empty();
-        let style = if hovered(app, Target::Mic) { primary() } else if has_model { Style::new() } else { dim() };
-        frame.render_widget(Paragraph::new(Span::styled(MIC, style)), rect);
+        let style = if hovered(app, Target::Mic) {
+            primary()
+        } else if has_model {
+            Style::new().fg(ACCENT)
+        } else {
+            dim()
+        };
+        frame.render_widget(Paragraph::new(Span::styled(format!(" {MIC} "), style)), rect);
         return;
     }
     let Some(area) = voice_area(app) else { return };
@@ -765,10 +773,10 @@ fn draw_voice(frame: &mut Frame, app: &App) {
     let line = Rect::new(area.x, area.y, area.width, 1);
     match &app.voice {
         VoiceState::Idle => {}
-        VoiceState::Recording { recording, .. } => {
+        VoiceState::Recording { recording, hint, .. } => {
             let seconds = recording.elapsed().as_secs();
             let clock = format!("  {}:{:02}", seconds / 60, seconds % 60);
-            let hint = "Enter — готово · Esc — отмена ";
+            let hint = *hint;
             let hint_width = if area.width > 60 { width(hint) } else { 0 };
             let bars = area.width.saturating_sub(2 + width(&clock) + hint_width + 2) as usize;
             let wave: String = recording
@@ -776,10 +784,11 @@ fn draw_voice(frame: &mut Frame, app: &App) {
                 .iter()
                 .map(|level| EQ_BARS[((level * (EQ_BARS.len() - 1) as f32).round() as usize).min(EQ_BARS.len() - 1)])
                 .collect();
-            // Точка мигает раз в полсекунды — видно, что пишем.
+            // Микрофон мигает раз в полсекунды — видно, что пишем.
             let blink = recording.elapsed().as_millis() / 500 % 2 == 0;
-            let dot = Style::new().fg(if blink { Color::Red } else { Color::Indexed(52) });
-            let mut spans = vec![Span::styled("● ", dot), Span::styled(wave, Style::new().fg(ACCENT)), Span::styled(clock, bold())];
+            let mic = Style::new().fg(if blink { Color::Red } else { Color::Indexed(52) }).add_modifier(Modifier::BOLD);
+            let mut spans =
+                vec![Span::styled(format!("{MIC} "), mic), Span::styled(wave, Style::new().fg(ACCENT)), Span::styled(clock, bold())];
             if hint_width > 0 {
                 spans.push(Span::raw("  "));
             }
@@ -1159,6 +1168,9 @@ fn draw_help(frame: &mut Frame, full: Rect) {
         Line::from(vec![Span::styled("Разрешения", bold), Span::raw(" — когда Claude спрашивает, можно ли")]),
         Line::raw("          что-то сделать, внизу появятся кнопки «Разрешить»"),
         Line::raw("          и «Отклонить». Можно ответить и в окне Claude."),
+        Line::raw(""),
+        Line::from(vec![Span::styled("Голос   ", bold), Span::raw(" — ⌘⇧Space или микрофон справа в поле ввода.")]),
+        Line::raw("          Модель выбирается в настройках, вкладка «Голос»."),
         Line::raw(""),
         Line::from(vec![Span::styled("Настройки", bold), Span::raw(" — в меню или ⌘, в VibeTerminal.")]),
         Line::raw(""),

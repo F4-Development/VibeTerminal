@@ -16,6 +16,7 @@ struct VoiceModel: Identifiable {
     var url: URL { URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(file)")! }
     var path: URL { Self.directory.appendingPathComponent(file) }
     var isDownloaded: Bool { FileManager.default.fileExists(atPath: path.path) }
+    var sizeText: String { ByteCountFormatter.string(fromByteCount: size, countStyle: .file) }
 
     static var directory: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vibeterminal/models")
@@ -31,13 +32,13 @@ struct VoiceModel: Identifiable {
         VoiceModel(
             id: "large-v3-turbo",
             title: "Точная",
-            detail: "Чуть точнее, но в три раза больше · 1,6 ГБ",
+            detail: "Чуть точнее, но в три раза тяжелее · 1,6 ГБ",
             size: 1_624_555_275,
             sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"),
         VoiceModel(
             id: "small",
             title: "Быстрая",
-            detail: "Для слабых Mac, ошибается чаще · 488 МБ",
+            detail: "Для старых Mac, ошибается чаще · 488 МБ",
             size: 487_601_967,
             sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"),
     ]
@@ -151,11 +152,12 @@ final class VoiceDownloads: ObservableObject {
     }
 }
 
-/// Вкладка «Голос»: модель (скачать, выбрать, удалить), язык, словарь,
-/// что делать с текстом, микрофон.
+/// Вкладка «Голос»: модель (скачать, выбрать, удалить), как записывать, что
+/// делать с текстом, язык, словарь, микрофон.
 struct VoiceSettings: View {
     @State private var settings = VvSettings.load()
     @ObservedObject private var downloads = VoiceDownloads.shared
+    @State private var deleting: VoiceModel?
     private let microphones = AVCaptureDevice.DiscoverySession(
         deviceTypes: [.builtInMicrophone, .externalUnknown], mediaType: .audio, position: .unspecified
     ).devices.map(\.localizedName)
@@ -169,33 +171,50 @@ struct VoiceSettings: View {
             } header: {
                 Text("Модель распознавания")
             } footer: {
-                Text("Распознаёт на этом Mac — звук никуда не уходит. Без модели голосового ввода нет.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Hint(settings.voiceModel.isEmpty
+                    ? "Скачай и выбери модель — без неё голосового ввода нет. Распознавание идёт на этом Mac, звук никуда не отправляется."
+                    : "Распознавание идёт на этом Mac, звук никуда не отправляется.")
             }
 
-            Section("Распознавание") {
-                Picker("Язык", selection: $settings.voiceLanguage) {
-                    Text("Русский").tag("ru")
-                    Text("Английский").tag("en")
-                    Text("Определять сам").tag("auto")
+            Section {
+                Picker("Как записывать", selection: $settings.voiceMode) {
+                    Text("Нажать и говорить").tag("press")
+                    Text("Удерживать клавишу").tag("hold")
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Словарь")
-                    TextField("", text: $settings.voiceWords, prompt: Text("Claude, commit, push, названия проектов…"), axis: .vertical)
-                        .lineLimit(2...4)
-                    Text("Слова, которые надо узнавать правильно, через запятую.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                .pickerStyle(.radioGroup)
+                Hint(settings.voiceMode == "hold"
+                    ? "Запись идёт, пока держишь ⌘⇧Space. Отпустил — распознано. Микрофон в поле ввода работает как «Нажать и говорить»."
+                    : "Нажми ⌘⇧Space или микрофон в поле ввода и говори. Enter — готово, Esc — отменить.")
+                Picker("Распознанный текст", selection: $settings.voiceAfter) {
+                    Text("Сразу отправить Claude").tag("send")
+                    Text("Вставить в поле ввода — отправлю сам").tag("insert")
                 }
-                Toggle("Сразу отправлять Claude", isOn: $settings.voiceSend)
-            }
-
-            Section("Микрофон") {
+                .pickerStyle(.radioGroup)
                 Picker("Микрофон", selection: $settings.voiceDevice) {
-                    Text("Как в системе").tag("")
+                    Text("Как в настройках macOS").tag("")
+                    if !microphones.isEmpty { Divider() }
                     ForEach(microphones, id: \.self) { Text($0).tag($0) }
                 }
+            } header: {
+                Text("Запись")
+            }
+
+            Section {
+                Picker("Язык речи", selection: $settings.voiceLanguage) {
+                    Text("Русский").tag("ru")
+                    Text("Английский").tag("en")
+                    Text("Определять автоматически").tag("auto")
+                }
+                LabeledContent {
+                    TextField("Словарь", text: $settings.voiceWords, prompt: Text("Claude, commit, push, vibe-ide"), axis: .vertical)
+                        .labelsHidden()
+                        .lineLimit(2...3)
+                } label: {
+                    Text("Словарь")
+                    Text("Имена и термины через запятую — их распознают точнее")
+                }
+            } header: {
+                Text("Распознавание")
             }
         }
         .formStyle(.grouped)
@@ -207,50 +226,64 @@ struct VoiceSettings: View {
                 settings.voiceModel = ""
             }
         }
+        .confirmationDialog(
+            "Удалить модель «\(deleting?.title ?? "")»?",
+            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+            presenting: deleting
+        ) { model in
+            Button("Удалить", role: .destructive) { downloads.delete(model) }
+            Button("Отмена", role: .cancel) {}
+        } message: { model in
+            Text("Файл \(model.sizeText) удалится с диска. Скачать модель можно снова.")
+        }
     }
 
     @ViewBuilder
     private func modelRow(_ model: VoiceModel) -> some View {
         let chosen = settings.voiceModel == model.id
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(model.title).fontWeight(chosen ? .semibold : .regular)
+        LabeledContent {
+            HStack(spacing: 8) {
+                if let fraction = downloads.progress[model.id] {
+                    ProgressView(value: fraction).frame(width: 100)
+                    Text("\(Int(fraction * 100)) %").monospacedDigit().foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                    Button("Отменить") { downloads.cancel(model) }
+                } else if downloads.busy.contains(model.id) {
+                    ProgressView().controlSize(.small)
+                    Text("Проверка…").foregroundStyle(.secondary)
+                } else if model.isDownloaded {
                     if chosen {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        Label("Используется", systemImage: "checkmark.circle.fill")
+                            .labelStyle(.titleAndIcon)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Button("Использовать") { settings.voiceModel = model.id }
                     }
-                }
-                Text(model.detail).font(.caption).foregroundStyle(.secondary)
-                if let error = downloads.errors[model.id] {
-                    Text(error).font(.caption).foregroundStyle(.red)
+                    Menu {
+                        Button("Показать в Finder") { NSWorkspace.shared.activateFileViewerSelecting([model.path]) }
+                        Divider()
+                        Button("Удалить…", role: .destructive) { deleting = model }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Ещё")
+                } else {
+                    Button("Скачать") { downloads.start(model) }
                 }
             }
-            Spacer()
-            if let fraction = downloads.progress[model.id] {
-                ProgressView(value: fraction).frame(width: 110)
-                Text("\(Int(fraction * 100))%").monospacedDigit().frame(width: 38, alignment: .trailing)
-                Button("Отмена") { downloads.cancel(model) }
-            } else if downloads.busy.contains(model.id) {
-                ProgressView().controlSize(.small)
-                Text("Проверяю…").foregroundStyle(.secondary)
-            } else if model.isDownloaded {
-                if !chosen {
-                    Button("Выбрать") { settings.voiceModel = model.id }
-                }
-                Button(role: .destructive) {
-                    downloads.delete(model)
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .help("Удалить модель")
+        } label: {
+            Text(model.title)
+            if let error = downloads.errors[model.id] {
+                Text(error).foregroundStyle(.red)
             } else {
-                Button("Скачать") { downloads.start(model) }
+                Text(model.detail)
             }
         }
         .id("\(model.id)-\(downloads.revision)")
         .onChange(of: downloads.busy) { busy in
-            // Скачалась, а модели ещё нет — сразу выбрать её.
+            // Скачалась, а модели ещё нет — сразу использовать её.
             if !busy.contains(model.id), model.isDownloaded, settings.voiceModel.isEmpty {
                 settings.voiceModel = model.id
             }
