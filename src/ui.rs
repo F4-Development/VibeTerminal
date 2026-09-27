@@ -487,6 +487,7 @@ fn draw_top(frame: &mut Frame, app: &App) {
         Span::styled(" >", Style::new().add_modifier(Modifier::BOLD)),
         Span::styled("~", accent()),
         Span::styled(" VibeTerminal ", Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(concat!("v", env!("CARGO_PKG_VERSION")), dim()),
     ]);
     frame.render_widget(Paragraph::new(logo), area);
     let open = matches!(app.overlay, Overlay::Menu(_));
