@@ -20,9 +20,110 @@ pub fn render(screen: &vt100::Screen, area: Rect, buf: &mut Buffer, truecolor: b
                 target.reset();
                 continue;
             }
-            target.set_symbol(if cell.has_contents() { cell.contents() } else { " " });
+            target.set_symbol(symbol(cell));
             target.set_style(style(cell, truecolor));
         }
+    }
+}
+
+/// Ссылки OSC 8 с экрана Claude. ratatui их не передаёт, поэтому после
+/// кадра ячейки со ссылкой печатаем ещё раз — тем же текстом и цветом, но
+/// внутри OSC 8: терминал делает их ссылками (⌘-наведение, ⌘-клик). Ячейки,
+/// закрытые окнами vv, не трогаем. `tag` — чтобы одинаковые номера ссылок
+/// разных сессий не слились в одну. Курсор и цвет возвращаются как были.
+pub fn links(screen: &vt100::Screen, area: Rect, drawn: &Buffer, truecolor: bool, tag: &str) -> Vec<u8> {
+    let (rows, cols) = screen.size();
+    let mut out = Vec::new();
+    for row in 0..area.height.min(rows) {
+        let mut open = 0;
+        for col in 0..area.width.min(cols) {
+            let Some(cell) = screen.cell(row, col) else { break };
+            if cell.is_wide_continuation() {
+                continue;
+            }
+            let (x, y) = (area.x + col, area.y + row);
+            let target = &drawn[(x, y)];
+            let expected = style(cell, truecolor);
+            let visible = target.symbol() == symbol(cell)
+                && target.fg == expected.fg.unwrap_or_default()
+                && target.bg == expected.bg.unwrap_or_default()
+                && target.modifier == expected.add_modifier;
+            let link = if visible { cell.link() } else { 0 };
+            let uri = screen.link_uri(link);
+            if link != open {
+                if open != 0 {
+                    out.extend_from_slice(b"\x1b]8;;\x1b\\");
+                }
+                open = 0;
+                if let Some(uri) = uri {
+                    out.extend_from_slice(format!("\x1b[{};{}H\x1b]8;id={tag}{link};{uri}\x1b\\", y + 1, x + 1).as_bytes());
+                    open = link;
+                }
+            }
+            if open != 0 {
+                out.extend_from_slice(sgr(target.fg, target.bg, target.modifier).as_bytes());
+                out.extend_from_slice(target.symbol().as_bytes());
+            }
+        }
+        if open != 0 {
+            out.extend_from_slice(b"\x1b]8;;\x1b\\");
+        }
+    }
+    if !out.is_empty() {
+        out.splice(0..0, *b"\x1b7");
+        out.extend_from_slice(b"\x1b[0m\x1b8");
+    }
+    out
+}
+
+fn symbol(cell: &vt100::Cell) -> &str {
+    if cell.has_contents() { cell.contents() } else { " " }
+}
+
+/// SGR для ячейки ratatui — чтобы повторная печать выглядела как кадр.
+fn sgr(fg: Color, bg: Color, modifier: Modifier) -> String {
+    let mut codes = vec!["0".to_string()];
+    let flags = [
+        (Modifier::BOLD, "1"),
+        (Modifier::DIM, "2"),
+        (Modifier::ITALIC, "3"),
+        (Modifier::UNDERLINED, "4"),
+        (Modifier::SLOW_BLINK, "5"),
+        (Modifier::REVERSED, "7"),
+        (Modifier::HIDDEN, "8"),
+        (Modifier::CROSSED_OUT, "9"),
+    ];
+    codes.extend(flags.iter().filter(|(flag, _)| modifier.contains(*flag)).map(|(_, code)| code.to_string()));
+    for (color, base) in [(fg, 38), (bg, 48)] {
+        match color {
+            Color::Reset => {}
+            Color::Rgb(r, g, b) => codes.push(format!("{base};2;{r};{g};{b}")),
+            Color::Indexed(i) => codes.push(format!("{base};5;{i}")),
+            named => codes.push(format!("{base};5;{}", ansi_index(named))),
+        }
+    }
+    format!("\x1b[{}m", codes.join(";"))
+}
+
+fn ansi_index(color: Color) -> u8 {
+    use Color::*;
+    match color {
+        Black => 0,
+        Red => 1,
+        Green => 2,
+        Yellow => 3,
+        Blue => 4,
+        Magenta => 5,
+        Cyan => 6,
+        Gray => 7,
+        DarkGray => 8,
+        LightRed => 9,
+        LightGreen => 10,
+        LightYellow => 11,
+        LightBlue => 12,
+        LightMagenta => 13,
+        LightCyan => 14,
+        _ => 15,
     }
 }
 
@@ -112,6 +213,54 @@ mod tests {
         render(parser.screen(), area, &mut buf, false);
         assert_eq!(buf[(0, 0)].fg, Color::Indexed(231));
         assert_eq!(buf[(0, 0)].bg, Color::Indexed(173));
+    }
+
+    const OPEN: &str = "\x1b]8;;https://example.com/a;b\x1b\\";
+    const CLOSE: &str = "\x1b]8;;\x1b\\";
+
+    #[test]
+    fn screen_remembers_hyperlinks() {
+        let mut parser = vt100::Parser::new(2, 20, 0);
+        // Сброс цвета внутри ссылки её не обрывает; `;` в адресе — часть адреса.
+        parser.process(format!("{OPEN}\x1b[94mdo\x1b[0mc{CLOSE} x").as_bytes());
+        let screen = parser.screen();
+        let link = screen.cell(0, 0).unwrap().link();
+        assert_ne!(link, 0);
+        assert_eq!(screen.link_uri(link), Some("https://example.com/a;b"));
+        assert_eq!(screen.cell(0, 2).unwrap().link(), link);
+        assert_eq!(screen.cell(0, 3).unwrap().link(), 0);
+        assert_eq!(screen.cell(0, 4).unwrap().link(), 0);
+        // Тот же адрес — тот же номер; стирание строки ссылку не разносит.
+        parser.process(format!("\r\n{OPEN}y\x1b[K{CLOSE}").as_bytes());
+        let screen = parser.screen();
+        assert_eq!(screen.cell(1, 0).unwrap().link(), link);
+        assert_eq!(screen.cell(1, 5).unwrap().link(), 0);
+    }
+
+    #[test]
+    fn hyperlinks_are_printed_over_the_frame() {
+        let mut parser = vt100::Parser::new(1, 8, 0);
+        parser.process(format!("> {OPEN}\x1b[94mdocs{CLOSE}!").as_bytes());
+        let area = Rect::new(3, 2, 8, 1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 4));
+        render(parser.screen(), area, &mut buf, true);
+        let out = String::from_utf8(links(parser.screen(), area, &buf, true, "vv7-")).unwrap();
+        assert_eq!(
+            out,
+            "\x1b7\x1b[3;6H\x1b]8;id=vv7-1;https://example.com/a;b\x1b\\\
+             \x1b[0;38;5;12md\x1b[0;38;5;12mo\x1b[0;38;5;12mc\x1b[0;38;5;12ms\
+             \x1b]8;;\x1b\\\x1b[0m\x1b8"
+        );
+        // Ссылку закрыло окно vv — печатаем только то, что видно.
+        buf[(6, 2)].set_symbol("░");
+        let out = String::from_utf8(links(parser.screen(), area, &buf, true, "vv7-")).unwrap();
+        assert!(out.contains("\x1b[3;8H\x1b]8;id=vv7-1;"), "{out:?}");
+        assert!(!out.contains('░') && !out.contains("mo"), "{out:?}");
+        // Нет ссылок — ничего не пишем.
+        let mut plain = vt100::Parser::new(1, 8, 0);
+        plain.process(b"text");
+        render(plain.screen(), area, &mut buf, true);
+        assert!(links(plain.screen(), area, &buf, true, "vv7-").is_empty());
     }
 
     #[test]

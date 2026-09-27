@@ -46,7 +46,7 @@ use crate::hooks::{self, Decision, HookEvent, HookServer, PermissionRequest, Sta
 use crate::hotkeys::{self, Hotkey};
 use crate::ui::{self, Areas, Target, contains};
 use crate::keys::{self, Edit};
-use crate::mouse;
+use crate::{mouse, view};
 
 /// Кнопки, колесо и движение мыши в формате SGR. Движение нужно, чтобы
 /// подсвечивать то, что под мышью; Claude получает его, только если просил.
@@ -225,6 +225,7 @@ pub fn run() -> Result<()> {
     let hooks = HookServer::start(&home.join(".vibeterminal/run"), tx.clone())?;
     let launch = Launch {
         truecolor: caps.truecolor,
+        hyperlinks: caps.hyperlinks,
         socket: hooks.path.clone(),
         vv_exe: std::env::current_exe().context("не знаю, где лежит vv")?,
     };
@@ -401,8 +402,16 @@ impl App {
     fn draw(&mut self, terminal: &mut Screen) -> Result<()> {
         terminal.backend_mut().write_all(FRAME_START)?;
         let this = &*self;
-        terminal.draw(|frame| ui::draw(frame, this))?;
+        let frame = terminal.draw(|frame| ui::draw(frame, this))?;
+        let links = match self.current() {
+            Some(session) if self.caps.hyperlinks => {
+                let tag = format!("vv{}-", session.id);
+                view::links(session.screen(), self.areas.agent, frame.buffer, self.caps.truecolor, &tag)
+            }
+            _ => Vec::new(),
+        };
         let out = terminal.backend_mut();
+        out.write_all(&links)?;
         let title = match self.current() {
             Some(session) => format!("{} — VibeTerminal", session.name),
             None => "VibeTerminal".to_string(),

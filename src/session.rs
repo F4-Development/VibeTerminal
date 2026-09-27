@@ -73,6 +73,8 @@ pub enum Program {
 /// Как запускать Claude в этом окне vv.
 pub struct Launch {
     pub truecolor: bool,
+    /// Терминал понимает ссылки OSC 8 (см. `Caps::hyperlinks`).
+    pub hyperlinks: bool,
     /// Сокет окна vv, куда стучатся хуки.
     pub socket: PathBuf,
     pub vv_exe: PathBuf,
@@ -183,6 +185,10 @@ impl Session {
         } else {
             cmd.env_remove("COLORTERM");
         }
+        // Ссылки: Claude узнаёт терминалы по TERM_PROGRAM, а тут он видит
+        // vv. Понимает терминал ссылки — пусть выводит их ссылками (vv
+        // передаст), нет — адресом текстом, чтобы адрес не потерялся.
+        cmd.env("FORCE_HYPERLINK", if launch.hyperlinks { "1" } else { "0" });
         cmd.env("TERM_PROGRAM", "vibeterminal");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         cmd.env(hooks::ENV_SESSION, id.to_string());

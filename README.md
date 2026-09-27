@@ -20,6 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/F4-Development/VibeTerminal/main/sc
 |---|---|
 | `src/` | `vv` — всё, что внутри окна: сессии, меню, кнопки, разрешения (Rust) |
 | `terminal/` | Приложение VibeTerminal — форк [Ghostty](https://ghostty.org) (Zig + Swift, MIT) |
+| `vendor/vt100/` | Эмулятор терминала для `vv` — [vt100](https://github.com/doy/vt100-rust) (MIT) со ссылками OSC 8 |
 | `assets/` | Иконка и русские тексты системных окон macOS |
 | `scripts/` | Сборка (`build-app.sh`), разработка (`dev.sh`), выпуск (`release.sh`), установка (`install.sh`) |
 | `TZ.md` | Техническое задание и план по шагам |

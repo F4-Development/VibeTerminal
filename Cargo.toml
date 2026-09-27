@@ -20,6 +20,10 @@ signal-hook = "0.4.4"
 vt100 = "0.16.2"
 whisper-rs = { version = "0.16.0", features = ["metal"] }
 
+# vt100 со ссылками (OSC 8) — правленая копия в vendor/vt100.
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }
+
 [profile.release]
 lto = "thin"
 strip = true

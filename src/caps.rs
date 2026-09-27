@@ -12,6 +12,9 @@ pub struct Caps {
     /// занимают следующую, если она пустая (Ghostty, VibeTerminal). Чтобы
     /// после такого символа был виден пробел, нужен ещё один.
     pub wide_symbols: bool,
+    /// Ссылки OSC 8. Тогда Claude выводит ссылки ссылками (синие, адрес
+    /// спрятан), а vv передаёт их терминалу; иначе Claude пишет адрес текстом.
+    pub hyperlinks: bool,
 }
 
 impl Caps {
@@ -33,7 +36,10 @@ impl Caps {
         };
         let pointer_shape = term_program == "ghostty" || term.contains("kitty");
         let wide_symbols = term_program == "ghostty";
-        Self { truecolor, pointer_shape, wide_symbols }
+        let hyperlinks = matches!(term_program, "ghostty" | "iTerm.app" | "WezTerm" | "vscode")
+            || term.contains("kitty")
+            || terminal_emulator.starts_with("JetBrains");
+        Self { truecolor, pointer_shape, wide_symbols, hyperlinks }
     }
 }
 
@@ -53,6 +59,13 @@ mod tests {
         assert!(Caps::from_env("", "", "xterm-256color", "JetBrains-JediTerm").truecolor);
         assert!(Caps::from_env("truecolor", "", "xterm-256color", "").truecolor);
         assert!(!Caps::from_env("", "", "xterm-256color", "").truecolor);
+    }
+
+    #[test]
+    fn hyperlinks_only_where_supported() {
+        assert!(Caps::from_env("", "ghostty", "xterm-ghostty", "").hyperlinks);
+        assert!(Caps::from_env("", "iTerm.app", "xterm-256color", "").hyperlinks);
+        assert!(!Caps::from_env("truecolor", "Apple_Terminal", "xterm-256color", "").hyperlinks);
     }
 
     #[test]

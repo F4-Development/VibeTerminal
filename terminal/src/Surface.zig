@@ -2679,7 +2679,8 @@ pub fn keyCallback(
         // OR
         // 2. mouse reporting is on and we are not reporting shift to the terminal
         if (self.io.terminal.flags.mouse_event == .none or
-            (self.mouse.mods.shift and !self.mouseShiftCapture(false)))
+            (self.mouse.mods.shift and !self.mouseShiftCapture(false)) or
+            self.linkModsHeld())
         {
             // Refresh our link state
             const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
@@ -3982,6 +3983,27 @@ pub fn mouseButtonCallback(
         }
     }
 
+    // VibeTerminal: ⌘-нажатие на ссылке не отдаём программе — иначе она
+    // получит нажатие без отпускания (отпускание откроет ссылку, см. выше).
+    // Прежний клик забываем: пока кнопка зажата, по нему решается, сдвинули
+    // ли мышь, и старый клик в другом месте гасил бы ссылку.
+    if (button == .left and action == .press and
+        self.mouse.over_link and self.linkModsHeld())
+    {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+        if (self.isMouseReporting()) {
+            if (self.mouse.left_click_pin) |prev| {
+                const t: *terminal.Terminal = self.renderer_state.terminal;
+                if (t.screens.get(self.mouse.left_click_screen)) |pin_screen| {
+                    pin_screen.pages.untrackPin(prev);
+                }
+                self.mouse.left_click_pin = null;
+            }
+            return true;
+        }
+    }
+
     // Report mouse events if enabled
     {
         self.renderer_state.mutex.lock();
@@ -4473,6 +4495,14 @@ fn linkAtPin(
     return null;
 }
 
+/// VibeTerminal: с ⌘ ссылки подсвечиваются и открываются, даже когда
+/// программа забрала мышь себе. vv забирает её всегда (кнопки, список
+/// сессий), а ссылки в ответах Claude должны работать как в обычном
+/// терминале. Без этого — только с ⌘⇧.
+fn linkModsHeld(self: *const Surface) bool {
+    return self.mouse.mods.equal(input.ctrlOrSuper(.{}));
+}
+
 /// This returns the mouse mods to consider for link highlighting or
 /// other purposes taking into account when shift is pressed for releasing
 /// the mouse from capture.
@@ -4715,7 +4745,8 @@ pub fn cursorPosCallback(
         self.mouse.link_point == null or
         (self.mouse.link_point != null and !self.mouse.link_point.?.eql(pos_vp))) and
         (self.io.terminal.flags.mouse_event == .none or
-            (self.mouse.mods.shift and !self.mouseShiftCapture(false))))
+            (self.mouse.mods.shift and !self.mouseShiftCapture(false)) or
+            self.linkModsHeld()))
     {
         // If we were previously over a link, we always update. We do this so that if the text
         // changed underneath us, even if the mouse didn't move, we update the URL hints and state

@@ -1,0 +1,13 @@
+# vt100 0.16.2 (https://github.com/doy/vt100-rust, MIT) со ссылками OSC 8:
+# ячейка помнит ссылку, как цвет. Правки помечены «VibeTerminal».
+[package]
+name = "vt100"
+version = "0.16.2"
+edition = "2021"
+license = "MIT"
+description = "Library for parsing terminal data"
+
+[dependencies]
+itoa = "1.0.15"
+unicode-width = "0.2.1"
+vte = "0.15.0"
