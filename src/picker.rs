@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use crate::keys;
 use crate::settings::Settings;
+use crate::worktree;
 
 pub struct Candidate {
     pub path: PathBuf,
@@ -171,6 +172,12 @@ fn collect(home: &Path) -> Vec<Candidate> {
             out.push(Candidate { display: display_path(&path, home), path, hint: "недавно" });
         }
     }
+    // Оставленные копии проектов — чтобы вернуться к задаче.
+    for path in worktree::kept(home) {
+        if seen.insert(path.clone()) {
+            out.push(Candidate { display: display_path(&path, home), path, hint: "копия" });
+        }
+    }
     for dir in Settings::load(home).projects_dirs(home) {
         for path in projects_dir(&dir) {
             if seen.insert(path.clone()) {
@@ -208,6 +215,15 @@ fn claude_projects(home: &Path) -> Vec<PathBuf> {
     found.into_iter().map(|(_, path)| path).collect()
 }
 
+/// В папке уже говорили с Claude — есть что продолжить. Claude называет
+/// папку диалогов по настоящему пути (`/tmp` → `/private/tmp`).
+pub fn has_dialogs(home: &Path, dir: &Path) -> bool {
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let dialogs = home.join(".claude/projects").join(claude_dir_name(&dir));
+    std::fs::read_dir(dialogs)
+        .is_ok_and(|entries| entries.flatten().any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl")))
+}
+
 /// Как Claude называет папку с диалогами проекта: всё, кроме букв и цифр, — `-`.
 fn claude_dir_name(path: &Path) -> String {
     path.to_string_lossy()
@@ -228,6 +244,11 @@ fn projects_dir(dir: &Path) -> Vec<PathBuf> {
         .collect();
     dirs.sort();
     dirs
+}
+
+/// Имя папки для подписи: `~/Projects/shop` → `shop`.
+pub fn folder_name(dir: &Path) -> String {
+    dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// `/Users/me/Projects/x` → `~/Projects/x`.

@@ -17,6 +17,7 @@ use crate::git::RepoStatus;
 use crate::hooks::{self, Decision, HookEvent, PermissionRequest, StatusLine};
 use crate::reload::HandedSession;
 use crate::status::{State, Status};
+use crate::worktree;
 
 const SCROLLBACK_LINES: usize = 10_000;
 /// Дольше этого не ждём конца кадра, даже если программа его не закрыла.
@@ -25,6 +26,15 @@ const SYNC_UPDATE_MAX: Duration = Duration::from_millis(100);
 const STOP_GRACE: Duration = Duration::from_millis(1500);
 /// По этим надписям узнаём родной диалог Claude: разрешение, вопрос, план.
 const PROMPT_MARKS: [&str; 3] = ["Esc to cancel", "Do you want to", "Would you like to proceed"];
+/// Подготовка копии проекта перед Claude: команда из `VV_SETUP`, потом
+/// то, что передано аргументами. Не вышло — Claude всё равно запустится,
+/// а ошибка останется на экране выше.
+const SETUP_SCRIPT: &str = r#"printf '\033[2m  Подготовка копии: %s\033[0m\n\n' "$VV_SETUP"
+sh -c "$VV_SETUP"
+code=$?
+[ $code -ne 0 ] && printf '\n\033[31m  Подготовка не удалась (код %s). Запускаю Claude.\033[0m\n' "$code"
+printf '\n'
+exec "$@""#;
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
@@ -53,6 +63,9 @@ pub type SessionId = u64;
 pub enum Program {
     /// Claude с этими флагами.
     Claude(Vec<String>),
+    /// Сначала команда подготовки (`npm install` в новой копии проекта) —
+    /// на виду, в этом же окне, — потом Claude с этими флагами.
+    ClaudeAfter(String, Vec<String>),
     /// Просто команда — например, вход в glab.
     Command(String),
 }
@@ -69,6 +82,11 @@ pub struct Session {
     pub id: SessionId,
     pub name: String,
     pub cwd: PathBuf,
+    /// Сессия в отдельной копии этого проекта (git worktree).
+    pub copy_of: Option<PathBuf>,
+    /// Чья сессия в списке: папка проекта, у копии — проекта, с которого
+    /// она сделана. Копии стоят деревом под своим проектом.
+    pub project: PathBuf,
     /// Запросы разрешения, которые ждут ответа. Показываем последний.
     pub permissions: VecDeque<PermissionRequest>,
     /// Git в папке сессии; `None` — не репозиторий или ещё не узнали.
@@ -136,8 +154,8 @@ impl Session {
         };
         let debug = std::env::var("VV_CLAUDE").ok();
         let mut cmd = match (program, debug.as_ref()) {
-            (Program::Command(script), _) | (Program::Claude(_), Some(script)) => shell(script),
-            (Program::Claude(claude_args), None) => {
+            (Program::Command(script), _) | (Program::Claude(_) | Program::ClaudeAfter(..), Some(script)) => shell(script),
+            (Program::Claude(claude_args) | Program::ClaudeAfter(_, claude_args), None) => {
                 let mut cmd = CommandBuilder::new("claude");
                 cmd.args(["--settings", &hooks::settings_json(&launch.vv_exe)]);
                 // Модель, режим разрешений и флаги из настроек.
@@ -149,6 +167,13 @@ impl Session {
                 cmd
             }
         };
+        if let Program::ClaudeAfter(setup, _) = program {
+            let mut prepare = shell(SETUP_SCRIPT);
+            prepare.arg("vv");
+            prepare.args(cmd.get_argv());
+            prepare.env("VV_SETUP", setup);
+            cmd = prepare;
+        }
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         // Говорим Claude правду о цветах: без 24-битного цвета он сам выберет
@@ -279,10 +304,13 @@ impl Session {
         pid: i32,
         is_command: bool,
     ) -> Self {
+        let copy_of = worktree::main_repo(cwd);
         Self {
             id,
             name,
             cwd: cwd.to_path_buf(),
+            copy_of: copy_of.clone(),
+            project: worktree::canonical(copy_of.as_deref().unwrap_or(cwd)),
             permissions: VecDeque::new(),
             git: None,
             git_busy: None,

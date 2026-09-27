@@ -8,6 +8,8 @@ use crate::status;
 pub enum Action {
     Select(usize),
     New,
+    /// Задача в отдельной копии проекта открытой сессии.
+    NewCopy,
     Rename,
     Close,
     ToggleSidebar,
@@ -38,7 +40,8 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
         .enumerate()
         .map(|(i, session)| MenuItem {
             icon: if i == selected { "❯" } else { " " },
-            label: session.name.clone(),
+            // Копии — с отступом под своим проектом, как в списке сессий.
+            label: if session.copy_of.is_some() { format!("  ⎇ {}", session.name) } else { session.name.clone() },
             hotkey: char::from_digit(i as u32 + 1, 10).filter(|_| i < 9),
             action: Action::Select(i),
             gap_before: false,
@@ -48,6 +51,7 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
     let sidebar_label = if sidebar_shown { "Скрыть список сессий" } else { "Показать список сессий" };
     let actions = [
         ("+", "Новая сессия", 'n', Action::New),
+        ("⎇", "Задача в отдельной копии…", 'k', Action::NewCopy),
         ("●", "Голосовой ввод", 'v', Action::Voice),
         ("→", "К следующей, кто ждёт", 'w', Action::NextWaiting),
         ("⎇", "Ветки и git…", 'g', Action::Git),
@@ -62,7 +66,7 @@ pub fn items(sessions: &[Session], selected: usize, sidebar_shown: bool) -> Vec<
     let has_session = !sessions.is_empty();
     let someone_waits = !status::queue(sessions, selected).is_empty();
     let actions = actions.into_iter().filter(|(_, _, _, action)| match action {
-        Action::Rename | Action::Close | Action::Git | Action::Voice => has_session,
+        Action::Rename | Action::Close | Action::Git | Action::Voice | Action::NewCopy => has_session,
         Action::NextWaiting => someone_waits,
         _ => true,
     });
@@ -83,7 +87,7 @@ pub fn hotkey(action: Action) -> Option<Hotkey> {
         Action::Rename => Hotkey::Rename,
         Action::Close => Hotkey::Close,
         Action::Usage => Hotkey::Usage,
-        Action::ToggleSidebar | Action::Settings | Action::Help | Action::Quit => return None,
+        Action::NewCopy | Action::ToggleSidebar | Action::Settings | Action::Help | Action::Quit => return None,
     })
 }
 

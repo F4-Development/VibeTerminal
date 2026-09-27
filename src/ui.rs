@@ -14,8 +14,9 @@ use crate::gitui::{self, GitTarget};
 use crate::hooks::{self, Decision};
 use crate::hotkeys;
 use crate::menu::{self, Action, MenuItem};
-use crate::picker::{Picker, display_path};
+use crate::picker::{Picker, display_path, folder_name};
 use crate::session::Session;
+use crate::sessionmenu;
 use crate::status::{self, State};
 use crate::usage;
 use crate::view;
@@ -105,6 +106,8 @@ pub enum Target {
     Bottom(Action),
     MenuItem(usize),
     PickerItem(usize),
+    /// «В отдельной копии» в выборе папки.
+    PickerCopy,
     DialogYes,
     DialogNo,
     /// Ответ на запрос разрешения сессии с этим номером.
@@ -126,6 +129,8 @@ pub enum Target {
     Mic,
     /// «Made with ♥ by F4 Studio» справа внизу — открывает сайт.
     Credit,
+    /// Пункт меню сессии (правый клик по ней).
+    SessionMenuItem(usize),
 }
 
 /// Что под мышью. Пока открыто окно, кликается только оно.
@@ -134,6 +139,7 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
     match &app.overlay {
         Overlay::Help => None,
         Overlay::Git(git) => gitui::target_at(git, full, column, row).map(Target::Git),
+        Overlay::SessionMenu(menu) => menu.item_at(full, column, row).map(Target::SessionMenuItem),
         Overlay::Usage(_) => {
             if contains(usage_refresh_rect(app), column, row) {
                 return Some(Target::UsageRefresh);
@@ -145,6 +151,9 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             menu_rows(full, &items).iter().position(|r| contains(*r, column, row)).map(Target::MenuItem)
         }
         Overlay::Picker(picker) => {
+            if picker_copy_button(full, picker).is_some_and(|r| contains(r, column, row)) {
+                return Some(Target::PickerCopy);
+            }
             let list = picker_list(full);
             let index = picker_offset(list, picker.selected) + row.checked_sub(list.y)? as usize;
             (contains(list, column, row) && index < picker.len()).then_some(Target::PickerItem(index))
@@ -192,10 +201,11 @@ pub fn target_at(app: &App, column: u16, row: u16) -> Option<Target> {
             if contains(new_button, column, row) {
                 return Some(Target::NewSession);
             }
-            let offset = cards_offset(cards, app.selected);
-            let index = card_at(cards, offset, column, row).filter(|&i| i < app.sessions.len())?;
+            // Строка проекта над его копиями не кликается — только карточки.
+            let (rect, slot) = visible_slots(app, cards).into_iter().find(|(r, _)| contains(*r, column, row))?;
+            let Slot::Card(index, tree) = slot else { return None };
             if app.sessions[index].pending_permission().is_some_and(|r| !r.is_question()) {
-                let [yes, no] = card_buttons(cards, offset, index);
+                let [yes, no] = card_buttons(rect, tree);
                 if contains(yes, column, row) {
                     return Some(Target::Permit(index, Decision::Allow));
                 }
@@ -262,11 +272,16 @@ pub fn permit_bar(app: &App) -> Option<PermitBar> {
     })
 }
 
-/// Кнопки «Да / Нет» в третьей строке карточки ждущей сессии.
-pub fn card_buttons(cards: Rect, offset: usize, index: usize) -> [Rect; 2] {
-    let y = cards.y + (index - offset) as u16 * CARD_ROWS + 2;
-    let yes = Rect::new(cards.x + 2, y, width(CARD_YES), 1);
-    let no = Rect::new(yes.right() + 3, y, width(CARD_NO), 1);
+/// Кнопки «Да / Нет» в третьей строке карточки ждущей сессии — под именем
+/// (у проекта с копиями — правее ствола дерева).
+pub fn card_buttons(card: Rect, tree: Tree) -> [Rect; 2] {
+    let indent = match tree {
+        Tree::Alone => 2,
+        Tree::Root => 3,
+        Tree::Branch | Tree::Last => 4,
+    };
+    let yes = Rect::new(card.x + indent, card.y + 2, width(CARD_YES), 1);
+    let no = Rect::new(yes.right() + 3, yes.y, width(CARD_NO), 1);
     [yes, no]
 }
 
@@ -284,14 +299,85 @@ pub fn sidebar_parts(sidebar: Rect) -> (Rect, Rect) {
     (cards, button)
 }
 
-/// Первая видимая карточка, чтобы выбранная не уехала за край.
-pub fn cards_offset(cards: Rect, selected: usize) -> usize {
-    let visible = (cards.height / CARD_ROWS).max(1) as usize;
-    selected.saturating_sub(visible - 1)
+// ── Дерево сессий ─────────────────────────────────────────────────────────
+
+/// Место карточки в дереве: копии проекта — ветками под ним.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tree {
+    /// Сама по себе.
+    Alone,
+    /// Проект, под ним его копии.
+    Root,
+    /// Копия, под ней ещё копии этого проекта.
+    Branch,
+    /// Последняя копия проекта.
+    Last,
 }
 
-pub fn card_at(cards: Rect, offset: usize, column: u16, row: u16) -> Option<usize> {
-    contains(cards, column, row).then(|| offset + ((row - cards.y) / CARD_ROWS) as usize)
+/// Строка списка сессий: карточка или проект, чьи копии открыты, а он сам — нет.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Slot {
+    /// Проект копии с этим номером.
+    Project(usize),
+    Card(usize, Tree),
+}
+
+/// Чья сессия и копия ли она — всё, что нужно дереву.
+pub fn tree_keys(sessions: &[Session]) -> Vec<(&Path, bool)> {
+    sessions.iter().map(|s| (s.project.as_path(), s.copy_of.is_some())).collect()
+}
+
+/// Порядок сессий деревом: сессии одного проекта подряд — проекты в том
+/// порядке, в каком их открывали, — и сам проект над своими копиями.
+/// Возвращает номера сессий в новом порядке.
+pub fn tree_order(keys: &[(&Path, bool)]) -> Vec<usize> {
+    let first = |i: usize| keys.iter().position(|(project, _)| *project == keys[i].0).unwrap_or(i);
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by_key(|&i| (first(i), keys[i].1));
+    order
+}
+
+/// Строки списка по сессиям, уже стоящим деревом.
+pub fn slots(keys: &[(&Path, bool)]) -> Vec<Slot> {
+    let mut out = Vec::new();
+    for (i, &(project, copy)) in keys.iter().enumerate() {
+        let same = |j: usize| keys.get(j).is_some_and(|(p, _)| *p == project);
+        if copy && !(i > 0 && same(i - 1)) {
+            out.push(Slot::Project(i));
+        }
+        let copy_next = same(i + 1) && keys[i + 1].1;
+        let tree = match (copy, copy_next) {
+            (false, false) => Tree::Alone,
+            (false, true) => Tree::Root,
+            (true, true) => Tree::Branch,
+            (true, false) => Tree::Last,
+        };
+        out.push(Slot::Card(i, tree));
+    }
+    out
+}
+
+/// Что в списке сессий под мышью: карточка или строка проекта.
+pub fn slot_at(app: &App, column: u16, row: u16) -> Option<Slot> {
+    let (cards, _) = sidebar_parts(app.areas.sidebar?);
+    visible_slots(app, cards).into_iter().find(|(r, _)| contains(*r, column, row)).map(|(_, slot)| slot)
+}
+
+/// Видимые строки списка сессий и где каждая. Прокручено так, чтобы
+/// выбранная не уехала за край.
+fn visible_slots(app: &App, cards: Rect) -> Vec<(Rect, Slot)> {
+    let slots = slots(&tree_keys(&app.sessions));
+    let visible = (cards.height / CARD_ROWS).max(1) as usize;
+    let selected = slots.iter().position(|s| matches!(s, Slot::Card(i, _) if *i == app.selected)).unwrap_or(0);
+    let offset = selected.saturating_sub(visible - 1);
+    slots
+        .into_iter()
+        .skip(offset)
+        .enumerate()
+        .map(|(n, slot)| (cards.y + n as u16 * CARD_ROWS, slot))
+        .take_while(|(y, _)| y + 1 < cards.bottom())
+        .map(|(y, slot)| (Rect::new(cards.x, y, cards.width, CARD_ROWS.min(cards.bottom() - y)), slot))
+        .collect()
 }
 
 /// Кнопки внизу. «Новая сессия» здесь, только когда спрятан список, где она уже есть.
@@ -373,6 +459,16 @@ pub fn picker_list(full: Rect) -> Rect {
     Rect::new(area.x, area.y + 2, area.width, area.height.saturating_sub(2))
 }
 
+const PICKER_COPY: &str = " ⎇ В отдельной копии  ⌥Enter ";
+
+/// Кнопка справа в строке поиска — если выбран git-проект.
+fn picker_copy_button(full: Rect, picker: &Picker) -> Option<Rect> {
+    let git = picker.selected_path().is_some_and(|path| path.join(".git").exists());
+    let search = inner(picker_rect(full));
+    let w = width(PICKER_COPY);
+    (git && search.width > w + 30).then(|| Rect::new(search.right() - w, search.y, w, 1))
+}
+
 pub fn picker_offset(list: Rect, selected: usize) -> usize {
     selected.saturating_sub((list.height as usize).saturating_sub(1))
 }
@@ -410,15 +506,20 @@ pub(crate) fn frame_block(title: &str, focused: bool) -> Block<'_> {
         .title(Span::styled(title, Style::new().add_modifier(Modifier::BOLD)))
 }
 
-/// Вторая строка карточки: тема диалога, а пока её нет — папка.
+/// Тема диалога из заголовка Claude, если она уже есть.
+fn dialog_title(session: &Session) -> Option<&str> {
+    // Без значка Claude в начале: статус и так виден справа.
+    let text = session.title().trim().trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    (!text.is_empty() && text != "Claude Code").then_some(text)
+}
+
+/// Тема диалога, а пока её нет — папка (у копии — чья она: её собственный
+/// путь длинный и ни о чём не говорит).
 fn session_detail(session: &Session, home: &Path) -> String {
-    let title = session.title().trim();
-    let text = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
-    if text.is_empty() || text == "Claude Code" {
-        display_path(&session.cwd, home)
-    } else {
-        // Без значка Claude в начале: статус и так виден справа.
-        text.to_string()
+    match (dialog_title(session), &session.copy_of) {
+        (Some(text), _) => text.to_string(),
+        (None, Some(project)) => format!("копия {}", display_path(project, home)),
+        (None, None) => display_path(&session.cwd, home),
     }
 }
 
@@ -449,7 +550,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             }
         }
         Overlay::Menu(cursor) => draw_menu(frame, app, *cursor),
-        Overlay::Picker(picker) => draw_picker(frame, full, picker),
+        Overlay::Picker(picker) => draw_picker(frame, app, picker),
         Overlay::Rename(input) => {
             let lines = vec![Line::raw("Новое имя сессии:"), Line::raw("")];
             let text = draw_dialog(frame, app, " Переименовать ", lines);
@@ -477,6 +578,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::Help => draw_help(frame, full),
         Overlay::Git(git) => gitui::draw(frame, git, full),
         Overlay::Usage(cursor) => draw_usage(frame, app, *cursor),
+        Overlay::SessionMenu(menu) => sessionmenu::draw(frame, menu, full),
     }
 }
 
@@ -502,57 +604,101 @@ fn draw_top(frame: &mut Frame, app: &App) {
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(frame_block(" Сессии ", false), area);
     let (cards, button) = sidebar_parts(area);
-    let offset = cards_offset(cards, app.selected);
-    for (i, session) in app.sessions.iter().enumerate().skip(offset) {
-        let y = cards.y + (i - offset) as u16 * CARD_ROWS;
-        if y + 1 >= cards.bottom() {
-            break;
+    for (rect, slot) in visible_slots(app, cards) {
+        match slot {
+            Slot::Project(first) => draw_project(frame, app, rect, first),
+            Slot::Card(index, tree) => draw_card(frame, app, rect, index, tree),
         }
-        let name = if i != app.selected && hovered(app, Target::Card(i)) {
-            Line::from(vec![
-                Span::styled("› ", Style::new().fg(ACCENT)),
-                Span::styled(session.name.as_str(), Style::new().fg(ACCENT)),
-            ])
-        } else if i == app.selected {
-            Line::from(vec![
-                Span::styled("❯ ", Style::new().fg(ACCENT)),
-                Span::styled(session.name.as_str(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            ])
-        } else {
-            Line::from(vec![Span::raw("  "), Span::raw(session.name.as_str())])
-        };
-        // Первая строка: имя слева, статус и время справа.
-        let mut name_width = cards.width;
-        if let Some((label, style)) = card_status(session) {
-            let w = width(&label).min(cards.width);
-            let x = cards.right().saturating_sub(w + 1);
-            name_width = x.saturating_sub(cards.x + 1);
-            frame.render_widget(Paragraph::new(Span::styled(label, style)), Rect::new(x, y, w, 1));
-        }
-        frame.render_widget(Paragraph::new(name), Rect::new(cards.x, y, name_width, 1));
-        let (detail, style) = card_detail(session, &app.home);
-        frame.render_widget(Paragraph::new(Span::styled(format!("  {detail}"), style)), Rect::new(cards.x, y + 1, cards.width, 1));
-
-        let Some(request) = session.pending_permission() else { continue };
-        let [yes, no] = card_buttons(cards, offset, i);
-        if yes.bottom() > cards.bottom() {
-            continue;
-        }
-        if request.is_question() {
-            if i != app.selected {
-                let style = if hovered(app, Target::Card(i)) { primary() } else { accent() };
-                let button = Rect::new(yes.x, yes.y, width(CARD_ANSWER).min(cards.width.saturating_sub(2)), 1);
-                frame.render_widget(Paragraph::new(Span::styled(CARD_ANSWER, style)), button);
-            }
-            continue;
-        }
-        let yes_style = if hovered(app, Target::Permit(i, Decision::Allow)) { primary() } else { accent() };
-        let no_style = if hovered(app, Target::Permit(i, Decision::Deny)) { primary() } else { bold() };
-        frame.render_widget(Paragraph::new(Span::styled(CARD_YES, yes_style)), yes);
-        frame.render_widget(Paragraph::new(Span::styled(CARD_NO, no_style)), no);
     }
     let style = if hovered(app, Target::NewSession) { primary() } else { accent() };
     frame.render_widget(Paragraph::new(Span::styled(NEW_BUTTON, style)), button);
+}
+
+/// Строка карточки: `dy`-я, если влезла.
+fn card_row(card: Rect, dy: u16) -> Option<Rect> {
+    (dy < card.height).then(|| Rect::new(card.x, card.y + dy, card.width, 1))
+}
+
+/// Линии дерева — цветом рамок.
+fn tree_line() -> Style {
+    Style::new().fg(BORDER)
+}
+
+/// Проект, чьи копии открыты без него самого: имя, путь и ствол к копиям.
+fn draw_project(frame: &mut Frame, app: &App, card: Rect, first: usize) {
+    let Some(project) = app.sessions.get(first).and_then(|s| s.copy_of.as_deref()) else { return };
+    let rows = [
+        Line::from(vec![Span::raw("  "), Span::styled(folder_name(project), bold())]),
+        Line::from(Span::styled(format!("  {}", display_path(project, &app.home)), dim())),
+        Line::from(Span::styled(" │", tree_line())),
+    ];
+    for (dy, line) in rows.into_iter().enumerate() {
+        if let Some(row) = card_row(card, dy as u16) {
+            frame.render_widget(Paragraph::new(line), row);
+        }
+    }
+}
+
+/// Карточка сессии: имя и статус, что делает, кнопки ответа. Копия —
+/// веткой дерева под своим проектом, выбранная — `❯` на ветке.
+fn draw_card(frame: &mut Frame, app: &App, card: Rect, i: usize, tree: Tree) {
+    let session = &app.sessions[i];
+    let selected = i == app.selected;
+    let hover = !selected && hovered(app, Target::Card(i));
+    let mark = if selected { "❯" } else if hover { "›" } else { "" };
+    let copy = matches!(tree, Tree::Branch | Tree::Last);
+    let mut spans = Vec::new();
+    if copy {
+        spans.push(Span::styled(if tree == Tree::Branch { " ├" } else { " └" }, tree_line()));
+        spans.push(if mark.is_empty() { Span::styled("─", tree_line()) } else { Span::styled(mark, Style::new().fg(ACCENT)) });
+        spans.push(Span::raw(" "));
+    } else {
+        spans.push(Span::styled(if mark.is_empty() { "  ".to_string() } else { format!("{mark} ") }, Style::new().fg(ACCENT)));
+    }
+    let name_style = match (selected, hover) {
+        (true, _) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        (_, true) => Style::new().fg(ACCENT),
+        _ => Style::new(),
+    };
+    spans.push(Span::styled(session.name.as_str(), name_style));
+
+    // Первая строка: имя слева, статус и время справа.
+    let mut name_width = card.width;
+    if let Some((label, style)) = card_status(session) {
+        let w = width(&label).min(card.width);
+        let x = card.right().saturating_sub(w + 1);
+        name_width = x.saturating_sub(card.x + 1);
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), Rect::new(x, card.y, w, 1));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), Rect::new(card.x, card.y, name_width, 1));
+    let trunk = match tree {
+        Tree::Alone | Tree::Root => "  ",
+        Tree::Branch => " │  ",
+        Tree::Last => "    ",
+    };
+    if let Some(row) = card_row(card, 1) {
+        let (detail, style) = card_detail(session, &app.home);
+        frame.render_widget(Paragraph::new(Line::from(vec![Span::styled(trunk, tree_line()), Span::styled(detail, style)])), row);
+    }
+    // Третья строка — ствол к следующей копии и кнопки ответа.
+    let Some(row) = card_row(card, 2) else { return };
+    if matches!(tree, Tree::Root | Tree::Branch) {
+        frame.render_widget(Paragraph::new(Span::styled(" │", tree_line())), row);
+    }
+    let Some(request) = session.pending_permission() else { return };
+    let [yes, no] = card_buttons(card, tree);
+    if request.is_question() {
+        if !selected {
+            let style = if hovered(app, Target::Card(i)) { primary() } else { accent() };
+            let w = width(CARD_ANSWER).min(card.right().saturating_sub(yes.x));
+            frame.render_widget(Paragraph::new(Span::styled(CARD_ANSWER, style)), Rect::new(yes.x, yes.y, w, 1));
+        }
+        return;
+    }
+    let yes_style = if hovered(app, Target::Permit(i, Decision::Allow)) { primary() } else { accent() };
+    let no_style = if hovered(app, Target::Permit(i, Decision::Deny)) { primary() } else { bold() };
+    frame.render_widget(Paragraph::new(Span::styled(CARD_YES, yes_style)), yes);
+    frame.render_widget(Paragraph::new(Span::styled(CARD_NO, no_style)), no);
 }
 
 /// Значок и время в статусе: «● 12с», «! 3м», «✓ 1ч», «○».
@@ -585,6 +731,8 @@ fn card_detail(session: &Session, home: &Path) -> (String, Style) {
         State::Working | State::Done => (status.detail.clone(), Style::new()),
         State::Failed => (status.detail.clone(), Style::new().fg(Color::Red)),
         State::Idle if !status.detail.is_empty() => (status.detail.clone(), dim()),
+        // Копия и так стоит под своим проектом.
+        State::Idle if session.copy_of.is_some() && dialog_title(session).is_none() => ("отдельная копия".into(), dim()),
         State::Idle => (session_detail(session, home), dim()),
     }
 }
@@ -680,6 +828,9 @@ fn draw_agent(frame: &mut Frame, app: &App) {
     view::render(session.screen(), app.areas.agent, frame.buffer_mut(), app.caps.truecolor);
 }
 
+/// В шапке после имени проекта, если сессия в его отдельной копии.
+const COPY_MARK: &str = "копия ";
+
 /// Шапка окна Claude и где в ней ветка (по ней кликают).
 struct Header {
     line: Line<'static>,
@@ -689,14 +840,19 @@ struct Header {
 fn header(app: &App) -> Option<Header> {
     let session = app.current()?;
     let area = app.areas.agent_frame;
-    let folder = session.cwd.file_name().map_or_else(|| session.cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
-    let folder = format!(" {folder} ");
-    let mut spans = vec![Span::styled(folder.clone(), bold())];
+    // Копия называется по проекту, а не по своей папке.
+    let folder = format!(" {} ", folder_name(session.copy_of.as_deref().unwrap_or(&session.cwd)));
+    let mut lead = width(&folder);
+    let mut spans = vec![Span::styled(folder, bold())];
+    if session.copy_of.is_some() {
+        spans.push(Span::styled(COPY_MARK, dim()));
+        lead += width(COPY_MARK);
+    }
     let mut branch = None;
     if let Some(git) = &session.git {
         // Точка между папкой и веткой — как перед путём.
         spans.push(Span::styled("· ", dim()));
-        let x = area.x + 1 + width(&folder) + width("· ");
+        let x = area.x + 1 + lead + width("· ");
         let label = format!("⎇ {}", git.head_label());
         let open = matches!(app.overlay, Overlay::Git(_));
         let style = if open || app.hover == Some(Target::Branch) { primary() } else { accent() };
@@ -1174,7 +1330,8 @@ fn draw_dialog(frame: &mut Frame, app: &App, title: &str, lines: Vec<Line>) -> R
     text
 }
 
-fn draw_picker(frame: &mut Frame, full: Rect, picker: &Picker) {
+fn draw_picker(frame: &mut Frame, app: &App, picker: &Picker) {
+    let full = app.areas.full;
     let area = picker_rect(full);
     frame.render_widget(Clear, area);
     let block = frame_block(" Новая сессия: в какой папке? ", true)
@@ -1195,6 +1352,10 @@ fn draw_picker(frame: &mut Frame, full: Rect, picker: &Picker) {
     let cursor_x = search.x + prompt.width() as u16 + width(&picker.query);
     frame.render_widget(Paragraph::new(Line::from(vec![prompt, query])), search);
     frame.set_cursor_position((cursor_x.min(search.right().saturating_sub(1)), search.y));
+    if let Some(button) = picker_copy_button(full, picker) {
+        let style = if hovered(app, Target::PickerCopy) { primary() } else { accent() };
+        frame.render_widget(Paragraph::new(Span::styled(PICKER_COPY, style)), button);
+    }
     let rule = Span::styled("─".repeat(content.width as usize), Style::new().fg(BORDER));
     frame.render_widget(Paragraph::new(rule), Rect::new(content.x, content.y + 1, content.width, 1));
 
@@ -1227,11 +1388,15 @@ fn draw_help(frame: &mut Frame, full: Rect) {
         Line::raw("          буквы — действия (подписаны справа)."),
         Line::raw(""),
         Line::from(vec![Span::styled("Мышь    ", bold), Span::raw(" — клик по сессии слева открывает её,")]),
-        Line::raw("          все кнопки кликаются, колесо листает историю."),
+        Line::raw("          правый клик — меню сессии (копия, имя, папка…)."),
+        Line::raw("          Кнопки кликаются, колесо листает историю."),
         Line::raw(""),
         Line::from(vec![Span::styled("Разрешения", bold), Span::raw(" — когда Claude спрашивает, можно ли")]),
         Line::raw("          что-то сделать, внизу появятся кнопки «Разрешить»"),
         Line::raw("          и «Отклонить». Можно ответить и в окне Claude."),
+        Line::raw(""),
+        Line::from(vec![Span::styled("Копия   ", bold), Span::raw(" — «Задача в отдельной копии» в меню: у задачи")]),
+        Line::raw("          своя ветка и свои файлы, Claude не мешают друг другу."),
         Line::raw(""),
         Line::from(vec![Span::styled("Голос   ", bold), Span::raw(" — ⌘⇧Space или микрофон справа в поле ввода.")]),
         Line::raw("          Модель выбирается в настройках, вкладка «Голос»."),
@@ -1249,4 +1414,33 @@ fn draw_help(frame: &mut Frame, full: Rect) {
     frame.render_widget(block, area);
     let text = Rect::new(content.x + 1, content.y + 1, content.width.saturating_sub(2), content.height.saturating_sub(1));
     frame.render_widget(Paragraph::new(lines), text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copies_stand_under_their_project() {
+        let (shop, landing) = (Path::new("/p/shop"), Path::new("/p/landing"));
+        // Открывали: shop, landing, копия shop, ещё копия shop.
+        let keys = [(shop, false), (landing, false), (shop, true), (shop, true)];
+        assert_eq!(tree_order(&keys), [0, 2, 3, 1]);
+        let arranged = [(shop, false), (shop, true), (shop, true), (landing, false)];
+        assert_eq!(
+            slots(&arranged),
+            [Slot::Card(0, Tree::Root), Slot::Card(1, Tree::Branch), Slot::Card(2, Tree::Last), Slot::Card(3, Tree::Alone)]
+        );
+    }
+
+    #[test]
+    fn copies_without_open_project_get_its_name() {
+        let (shop, landing) = (Path::new("/p/shop"), Path::new("/p/landing"));
+        let keys = [(landing, false), (shop, true)];
+        assert_eq!(tree_order(&keys), [0, 1]);
+        assert_eq!(slots(&keys), [Slot::Card(0, Tree::Alone), Slot::Project(1), Slot::Card(1, Tree::Last)]);
+        // Проект открыли позже — он встаёт над своей копией.
+        let keys = [(shop, true), (landing, false), (shop, false)];
+        assert_eq!(tree_order(&keys), [2, 0, 1]);
+    }
 }

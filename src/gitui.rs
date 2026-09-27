@@ -2,7 +2,7 @@
 //! диалоги выбора и окно коммита. Здесь их состояние, клавиши, геометрия
 //! для кликов и отрисовка; vv исполняет то, что они вернут (`Command`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -15,8 +15,9 @@ use ratatui::widgets::{Clear, Paragraph};
 use crate::ci::{self, CiState, CiStatus, Job, Pipeline, Provider};
 use crate::git::{self, Branch, ChangedFile, Failure, GitOp, OpError, Operation, RepoStatus};
 use crate::keys;
-use crate::picker::score;
+use crate::picker::{folder_name, score};
 use crate::ui::{accent, bold, centered, contains, dim, frame_block, primary, width};
+use crate::worktree::{self, Start, Worktree};
 
 const MENU_WIDTH: u16 = 62;
 const DIALOG_WIDTH: u16 = 66;
@@ -29,6 +30,7 @@ pub enum GitOverlay {
     Choice(GitChoice),
     Commit(CommitDialog),
     Ci(CiView),
+    Copy(CopyDialog),
 }
 
 /// Что сделать vv в ответ на клавишу или клик.
@@ -45,6 +47,18 @@ pub enum Command {
     CiRetry,
     /// Открыть сессию с командой (вход в glab/gh, установка).
     Terminal { name: String, command: String },
+    /// Окно «Задача в отдельной копии» для проекта этой папки; ветка — если уже известна.
+    OpenCopy { from: PathBuf, branch: String },
+    /// Сделать копию проекта папки на ветке, подготовить и открыть в ней сессию.
+    NewCopy { from: PathBuf, branch: String, setup: String },
+    /// Открыть сессию прямо в этой папке.
+    OpenFolder(PathBuf),
+    /// К сессии в этой папке, а нет такой — открыть её.
+    GoTo(PathBuf),
+    /// Закрыть открытую сессию; `Some(force)` — и удалить её копию проекта.
+    CloseSession(Option<bool>),
+    /// Следующий вопрос — например, «точно удалить?».
+    Ask(Box<GitChoice>),
 }
 
 /// Кликабельные места в окнах git.
@@ -62,6 +76,9 @@ pub struct GitMenu {
     cwd: PathBuf,
     status: RepoStatus,
     branches: Vec<Branch>,
+    /// Где какие ветки открыты: в основной папке и копиях проекта.
+    worktrees: Vec<Worktree>,
+    project: Option<PathBuf>,
     query: String,
     cursor: usize,
     entries: Vec<Entry>,
@@ -90,6 +107,7 @@ enum MenuAction {
     Push,
     Commit,
     NewBranch,
+    NewCopy,
     Resolve,
     Continue(Operation),
     Abort(Operation),
@@ -98,7 +116,18 @@ enum MenuAction {
 impl GitMenu {
     pub fn new(cwd: PathBuf, status: RepoStatus, anchor: Rect) -> Self {
         let branches = git::branches(&cwd);
-        let mut menu = Self { cwd, status, branches, query: String::new(), cursor: 0, entries: Vec::new(), anchor };
+        let (worktrees, project) = (worktree::list(&cwd), worktree::project_root(&cwd));
+        let mut menu = Self {
+            cwd,
+            status,
+            branches,
+            worktrees,
+            project,
+            query: String::new(),
+            cursor: 0,
+            entries: Vec::new(),
+            anchor,
+        };
         menu.rebuild();
         menu
     }
@@ -141,6 +170,7 @@ impl GitMenu {
                 entries.push(action("✓", "Закоммитить…", hint, MenuAction::Commit));
             }
             entries.push(action("+", "Новая ветка…", String::new(), MenuAction::NewBranch));
+            entries.push(action("⎇", "Задача в отдельной копии…", String::new(), MenuAction::NewCopy));
         }
 
         let query = self.query.trim().to_lowercase();
@@ -165,6 +195,9 @@ impl GitMenu {
                 if b.behind > 0 {
                     hint.push_str(&format!("↓{}", b.behind));
                 }
+                if let Some(place) = self.open_elsewhere(b).map(|dir| self.place(&dir)) {
+                    hint = format!("{place} {hint}");
+                }
                 let icon = if b.current { "❯" } else { " " };
                 entries.push(Entry { kind: EntryKind::Branch(i), icon, label: b.name.clone(), hint: hint.trim().into() });
             }
@@ -172,6 +205,25 @@ impl GitMenu {
         self.entries = entries;
         self.cursor = 0;
         self.move_by(0);
+    }
+
+    /// Папка, где эта ветка открыта, если не здесь: в одной ветке может
+    /// работать только одна папка.
+    fn open_elsewhere(&self, branch: &Branch) -> Option<PathBuf> {
+        // Текущая открыта здесь, даже если сессия — в подпапке проекта.
+        if branch.current || branch.remote {
+            return None;
+        }
+        let open = self.worktrees.iter().find(|w| w.branch.as_deref() == Some(branch.name.as_str()))?;
+        (!worktree::same_dir(&open.path, &self.cwd)).then(|| open.path.clone())
+    }
+
+    /// «в основной папке» или «в копии».
+    fn place(&self, dir: &Path) -> &'static str {
+        match &self.project {
+            Some(project) if worktree::same_dir(dir, project) => "в основной папке",
+            _ => "в копии",
+        }
     }
 
     fn selectable(&self, i: usize) -> bool {
@@ -206,6 +258,7 @@ impl GitMenu {
                 MenuAction::Push => Activation::Command(Command::Run(GitOp::Push)),
                 MenuAction::Commit => Activation::Commit,
                 MenuAction::NewBranch => Activation::NewBranch,
+                MenuAction::NewCopy => Activation::NewCopy,
                 MenuAction::Resolve => Activation::Command(Command::AskClaude(resolve_prompt(self.status.operation))),
                 MenuAction::Continue(op) => Activation::Command(Command::Run(GitOp::Continue(op))),
                 MenuAction::Abort(op) => Activation::Abort(op),
@@ -239,6 +292,7 @@ enum Activation {
     Branch(Branch),
     Commit,
     NewBranch,
+    NewCopy,
     Abort(Operation),
 }
 
@@ -260,6 +314,8 @@ fn resolve_prompt(operation: Option<Operation>) -> String {
 pub struct BranchMenu {
     parent: Box<GitMenu>,
     branch: Branch,
+    /// Ветка открыта в другой папке проекта — туда и переходить.
+    open_in: Option<PathBuf>,
     items: Vec<(String, BranchAction)>,
     cursor: usize,
 }
@@ -267,6 +323,8 @@ pub struct BranchMenu {
 #[derive(Clone, Copy)]
 enum BranchAction {
     Switch,
+    OpenCopy,
+    GoTo,
     NewFrom,
     Merge,
     Rebase,
@@ -279,12 +337,20 @@ impl BranchMenu {
         let current = parent.status.head_label();
         let name = &branch.name;
         let mut items = Vec::new();
-        if branch.current {
+        let open_in = parent.open_elsewhere(&branch);
+        if let Some(dir) = &open_in {
+            let go = if parent.place(dir) == "в копии" { "Перейти в её копию" } else { "Перейти в основную папку" };
+            items.push((go.to_string(), BranchAction::GoTo));
+            items.push(("Новая ветка от неё…".to_string(), BranchAction::NewFrom));
+            items.push((format!("Слить «{name}» в «{current}» (merge)"), BranchAction::Merge));
+            items.push((format!("Перебазировать «{current}» на «{name}» (rebase)"), BranchAction::Rebase));
+        } else if branch.current {
             items.push(("Новая ветка от неё…".to_string(), BranchAction::NewFrom));
             items.push(("Переименовать…".to_string(), BranchAction::Rename));
         } else {
             let switch = if branch.remote { "Переключиться (создать локальную)" } else { "Переключиться" };
             items.push((switch.to_string(), BranchAction::Switch));
+            items.push(("Открыть в отдельной копии".to_string(), BranchAction::OpenCopy));
             items.push(("Новая ветка от неё…".to_string(), BranchAction::NewFrom));
             items.push((format!("Слить «{name}» в «{current}» (merge)"), BranchAction::Merge));
             items.push((format!("Перебазировать «{current}» на «{name}» (rebase)"), BranchAction::Rebase));
@@ -293,7 +359,7 @@ impl BranchMenu {
                 items.push(("Удалить…".to_string(), BranchAction::Delete));
             }
         }
-        Self { parent: Box::new(parent), branch, items, cursor: 0 }
+        Self { parent: Box::new(parent), branch, open_in, items, cursor: 0 }
     }
 
     fn rect(&self, full: Rect) -> Rect {
@@ -352,6 +418,14 @@ pub enum ChoiceAction {
     Run(GitOp),
     AskClaude(String),
     Terminal { name: String, command: String },
+    /// Окно «Задача в отдельной копии» для проекта этой папки.
+    Copy(PathBuf),
+    /// Открыть сессию прямо в этой папке.
+    OpenHere(PathBuf),
+    /// Закрыть открытую сессию; `Some(force)` — и удалить её копию проекта.
+    CloseSession(Option<bool>),
+    /// Задать следующий вопрос.
+    Ask(Box<GitChoice>),
     Close,
 }
 
@@ -370,6 +444,10 @@ impl GitChoice {
             ChoiceAction::Run(op) => Command::Run(op),
             ChoiceAction::AskClaude(text) => Command::AskClaude(text),
             ChoiceAction::Terminal { name, command } => Command::Terminal { name, command },
+            ChoiceAction::Copy(from) => Command::OpenCopy { from, branch: String::new() },
+            ChoiceAction::OpenHere(dir) => Command::OpenFolder(dir),
+            ChoiceAction::CloseSession(remove) => Command::CloseSession(remove),
+            ChoiceAction::Ask(next) => Command::Ask(next),
             ChoiceAction::Close => Command::Close,
         }
     }
@@ -558,6 +636,226 @@ impl CommitDialog {
             .map(|(row, i)| (Rect::new(list.x, list.y + row as u16, list.width, 1), i))
             .collect()
     }
+}
+
+// ── Задача в отдельной копии ──────────────────────────────────────────────
+
+pub struct CopyDialog {
+    /// С какой папки делаем копию: новая ветка — от того, что открыто в ней.
+    from: PathBuf,
+    project: PathBuf,
+    /// Ветка (или коммит) в `from`.
+    base: String,
+    /// Незакоммиченные изменения в `from` — в копию они не попадут.
+    dirty: u32,
+    branches: Vec<Branch>,
+    worktrees: Vec<Worktree>,
+    branch: String,
+    /// Команда подготовки копии перед Claude; пусто — без подготовки.
+    setup: String,
+    /// Что выбрано в прошлый раз и что нашлось по файлам проекта — для подписи.
+    remembered: Option<String>,
+    detected: Option<(&'static str, &'static str)>,
+    focus: CopyField,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyField {
+    Branch,
+    Setup,
+}
+
+const COPY_BUTTONS: [&str; 2] = [" Создать ", " Отмена "];
+
+impl CopyDialog {
+    fn branch(&self) -> String {
+        worktree::branch_name(&self.branch)
+    }
+
+    fn start(&self) -> Start {
+        worktree::start(&self.branch(), &self.branches, &self.worktrees)
+    }
+
+    /// Подпись под веткой: что с ней будет. `true` — копию сделать можно.
+    fn branch_hint(&self) -> (String, Style, bool) {
+        let alarm = Style::new().fg(Color::Red);
+        if self.branch.trim().is_empty() {
+            return ("Например, feat-login".into(), dim(), false);
+        }
+        match self.start() {
+            Start::New => (format!("Новая ветка от {}", self.base), dim(), true),
+            Start::Existing => ("Такая ветка уже есть — копия откроется на ней".into(), dim(), true),
+            Start::Remote(remote) => (format!("Есть на сервере — заберу из {remote}"), dim(), true),
+            Start::Busy(path) if worktree::same_dir(&path, &self.project) => {
+                ("Эта ветка открыта в основной папке — выбери другое имя".into(), alarm, false)
+            }
+            Start::Busy(path) => {
+                (format!("Уже открыта в копии «{}» — выбери другое имя", folder_name(&path)), alarm, false)
+            }
+            Start::Invalid => ("Так ветку назвать нельзя".into(), alarm, false),
+        }
+    }
+
+    /// Подпись под командой подготовки: откуда она взялась.
+    fn setup_hint(&self) -> String {
+        let setup = self.setup.trim();
+        if setup.is_empty() {
+            return "Без подготовки — Claude запустится сразу".into();
+        }
+        let why = match self.detected {
+            _ if self.remembered.as_deref() == Some(setup) => "Как в прошлый раз".to_string(),
+            Some((command, file)) if command == setup => format!("Нашёл {file}"),
+            _ => "Своя команда".to_string(),
+        };
+        format!("{why} · выполнится в копии перед Claude")
+    }
+
+    /// Новую ветку начнём с того, что в папке, — без незакоммиченного.
+    fn warning(&self) -> Option<String> {
+        (self.start() == Start::New && self.dirty > 0)
+            .then(|| format!("⚠ Незакоммиченные изменения ({}) в копию не попадут", self.dirty))
+    }
+
+    fn field(&mut self) -> &mut String {
+        match self.focus {
+            CopyField::Branch => &mut self.branch,
+            CopyField::Setup => &mut self.setup,
+        }
+    }
+
+    fn submit(&mut self) -> Command {
+        if !self.branch_hint().2 {
+            self.focus = CopyField::Branch;
+            return Command::Redraw;
+        }
+        Command::NewCopy { from: self.from.clone(), branch: self.branch(), setup: self.setup.trim().to_string() }
+    }
+
+    fn rect(full: Rect) -> Rect {
+        // Рамка; ветка: подпись, поле, что с ней будет; подготовка: то же;
+        // предупреждение, пустая строка, кнопки.
+        centered(full, DIALOG_WIDTH, 12)
+    }
+
+    fn row(full: Rect, i: u16) -> Rect {
+        let inner = frame_block("", true).inner(Self::rect(full));
+        Rect::new(inner.x + 1, inner.y + i, inner.width.saturating_sub(2), 1)
+    }
+
+    /// Поля ввода: ветка и команда подготовки.
+    fn fields(full: Rect) -> [Rect; 2] {
+        [Self::row(full, 1), Self::row(full, 5)]
+    }
+
+    fn buttons(full: Rect) -> Vec<Rect> {
+        let inner = frame_block("", true).inner(Self::rect(full));
+        let y = inner.bottom().saturating_sub(1);
+        let first = Rect::new(inner.x + 1, y, width(COPY_BUTTONS[0]), 1);
+        let second = Rect::new(first.right() + 2, y, width(COPY_BUTTONS[1]), 1);
+        vec![first, second]
+    }
+}
+
+/// Окно «Задача в отдельной копии» для проекта папки, с веткой `branch`
+/// (пусто — ввести). `None` — там нет git.
+pub fn open_copy(from: &Path, branch: &str, home: &Path) -> Option<GitOverlay> {
+    let project = worktree::project_root(from)?;
+    let status = git::status(from)?;
+    let remembered = worktree::remembered_setup(home, &project);
+    let detected = worktree::detect_setup(&project);
+    let setup = remembered.clone().or(detected.map(|(command, _)| command.to_string())).unwrap_or_default();
+    Some(GitOverlay::Copy(CopyDialog {
+        from: from.to_path_buf(),
+        project,
+        base: status.head_label(),
+        dirty: status.changed,
+        branches: git::branches(from),
+        worktrees: worktree::list(from),
+        branch: branch.to_string(),
+        setup,
+        remembered,
+        detected,
+        focus: CopyField::Branch,
+    }))
+}
+
+/// Закрыть сессию в копии проекта: копию оставить или удалить. Удалить
+/// сразу предлагаем, только если копию сделал vv и ничего не пропадёт.
+/// `foreign` — где лежит копия, сделанная не в vv (руками, `claude -w`).
+pub fn close_copy(name: &str, project: &str, branch: &str, changed: u32, foreign: Option<&str>) -> GitOverlay {
+    let title = format!("Закрыть «{name}»?");
+    let keeps = format!("Ветка {branch} останется в любом случае.");
+    let dialog = if let Some(dir) = foreign {
+        let sure = GitChoice::new(
+            "Удалить копию целиком?",
+            &format!("Папка {dir} удалится вместе со всем, что в ней не в git. {keeps}"),
+            vec![("Удалить", ChoiceAction::CloseSession(Some(true))), ("Отмена", ChoiceAction::Close)],
+        );
+        GitChoice::new(
+            &title,
+            &format!("Claude остановится. Это копия {project} в {dir}, сделанная не в VibeTerminal."),
+            vec![
+                ("Оставить копию", ChoiceAction::CloseSession(None)),
+                ("Удалить копию…", ChoiceAction::Ask(Box::new(sure))),
+                ("Отмена", ChoiceAction::Close),
+            ],
+        )
+    } else if changed == 0 {
+        GitChoice::new(
+            &title,
+            &format!(
+                "Claude остановится. Это отдельная копия {project}, незакоммиченного в ней нет — её можно удалить. {keeps}"
+            ),
+            vec![
+                ("Удалить копию", ChoiceAction::CloseSession(Some(false))),
+                ("Оставить копию", ChoiceAction::CloseSession(None)),
+                ("Отмена", ChoiceAction::Close),
+            ],
+        )
+    } else {
+        let sure = GitChoice::new(
+            "Удалить копию с изменениями?",
+            &format!("Незакоммиченные изменения ({changed}) пропадут навсегда. {keeps}"),
+            vec![("Удалить всё равно", ChoiceAction::CloseSession(Some(true))), ("Отмена", ChoiceAction::Close)],
+        );
+        GitChoice::new(
+            &title,
+            &format!(
+                "Claude остановится. Это отдельная копия {project}, в ней незакоммиченные изменения ({changed}). \
+                 Оставь копию, чтобы к ним вернуться. {keeps}"
+            ),
+            vec![
+                ("Оставить копию", ChoiceAction::CloseSession(None)),
+                ("Удалить копию…", ChoiceAction::Ask(Box::new(sure))),
+                ("Отмена", ChoiceAction::Close),
+            ],
+        )
+    };
+    GitOverlay::Choice(dialog)
+}
+
+/// Копию удалить не вышло.
+pub fn remove_failed(text: &str) -> GitOverlay {
+    GitOverlay::Choice(GitChoice::new("Копия не удалилась", &first_lines(text, 6), vec![("ОК", ChoiceAction::Close)]))
+}
+
+/// Копию сделать не вышло — объяснить почему.
+pub fn copy_failed(text: &str) -> GitOverlay {
+    GitOverlay::Choice(GitChoice::new("Копия не получилась", &first_lines(text, 6), vec![("ОК", ChoiceAction::Close)]))
+}
+
+/// В папке уже работает Claude: второй будет ему мешать — предложить копию.
+pub fn folder_busy(dir: &Path, name: &str) -> GitOverlay {
+    GitOverlay::Choice(GitChoice::new(
+        &format!("В {name} уже работает Claude"),
+        "Два Claude в одной папке правят одни и те же файлы и мешают друг другу. \
+         В отдельной копии у задачи будет своя ветка и свои файлы.",
+        vec![
+            ("В отдельной копии", ChoiceAction::Copy(dir.to_path_buf())),
+            ("Всё равно в этой папке", ChoiceAction::OpenHere(dir.to_path_buf())),
+            ("Отмена", ChoiceAction::Close),
+        ],
+    ))
 }
 
 // ── CI ────────────────────────────────────────────────────────────────────
@@ -812,6 +1110,27 @@ pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
             }
             _ => Command::None,
         },
+        GitOverlay::Copy(copy) => match key.code {
+            KeyCode::Esc => Command::Close,
+            KeyCode::Enter => copy.submit(),
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                copy.focus = if copy.focus == CopyField::Branch { CopyField::Setup } else { CopyField::Branch };
+                Command::Redraw
+            }
+            KeyCode::Backspace => {
+                copy.field().pop();
+                Command::Redraw
+            }
+            KeyCode::Char('u') if ctrl => {
+                copy.field().clear();
+                Command::Redraw
+            }
+            KeyCode::Char(c) if !ctrl => {
+                copy.field().push(c);
+                Command::Redraw
+            }
+            _ => Command::None,
+        },
         GitOverlay::Choice(choice) => match key.code {
             KeyCode::Esc => Command::Close,
             KeyCode::Left => {
@@ -889,6 +1208,7 @@ pub fn on_paste(overlay: &mut GitOverlay, text: &str) {
             menu.rebuild();
         }
         GitOverlay::Input(input) => input.value.push_str(line),
+        GitOverlay::Copy(copy) => copy.field().push_str(line),
         GitOverlay::Commit(commit) => commit.message.push_str(line),
         _ => {}
     }
@@ -917,6 +1237,7 @@ fn activate_menu(overlay: &mut GitOverlay) -> Command {
             });
             Command::Redraw
         }
+        Activation::NewCopy => Command::OpenCopy { from: menu.cwd.clone(), branch: String::new() },
         Activation::Abort(operation) => {
             *overlay = GitOverlay::Choice(GitChoice::new(
                 &format!("Отменить {}?", operation.label()),
@@ -946,6 +1267,12 @@ fn activate_branch(overlay: &mut GitOverlay) -> Command {
     let name = branch.name.clone();
     match menu.items[menu.cursor].1 {
         BranchAction::Switch => Command::Run(GitOp::Switch { branch: name, remote: branch.remote, carry: false }),
+        BranchAction::GoTo => menu.open_in.clone().map_or(Command::None, Command::GoTo),
+        BranchAction::OpenCopy => {
+            // С сервера — локальная ветка с тем же именем.
+            let local = if branch.remote { name.split_once('/').map_or(name.as_str(), |(_, n)| n) } else { &name };
+            Command::OpenCopy { from: menu.parent.cwd.clone(), branch: local.to_string() }
+        }
         BranchAction::Merge => Command::Run(GitOp::Merge(name)),
         BranchAction::Rebase => Command::Run(GitOp::Rebase(name)),
         BranchAction::NewFrom => {
@@ -992,6 +1319,12 @@ pub fn target_at(overlay: &GitOverlay, full: Rect, column: u16, row: u16) -> Opt
             .map(GitTarget::Button),
         GitOverlay::Choice(choice) => {
             choice.buttons(full).iter().position(|r| contains(*r, column, row)).map(GitTarget::Button)
+        }
+        GitOverlay::Copy(_) => {
+            if let Some(i) = CopyDialog::buttons(full).iter().position(|r| contains(*r, column, row)) {
+                return Some(GitTarget::Button(i));
+            }
+            CopyDialog::fields(full).iter().position(|r| contains(*r, column, row)).map(GitTarget::Row)
         }
         GitOverlay::Ci(view) => {
             if let Some(i) = view.button_rects(full).iter().position(|r| contains(*r, column, row)) {
@@ -1047,6 +1380,12 @@ pub fn click(overlay: &mut GitOverlay, target: GitTarget) -> Command {
         }
         (GitOverlay::Input(input), GitTarget::Button(0)) => input.submit(),
         (GitOverlay::Input(_), GitTarget::Button(_)) => Command::Close,
+        (GitOverlay::Copy(copy), GitTarget::Button(0)) => copy.submit(),
+        (GitOverlay::Copy(copy), GitTarget::Row(i)) => {
+            copy.focus = if i == 0 { CopyField::Branch } else { CopyField::Setup };
+            Command::Redraw
+        }
+        (GitOverlay::Copy(_), GitTarget::Button(_)) => Command::Close,
         (GitOverlay::Choice(choice), GitTarget::Button(i)) => choice.choose(i),
         (GitOverlay::Commit(commit), GitTarget::Button(i)) => commit.button(i),
         (GitOverlay::Ci(view), GitTarget::Button(i)) => view.press(i),
@@ -1099,6 +1438,7 @@ pub fn draw(frame: &mut Frame, overlay: &GitOverlay, full: Rect) {
         GitOverlay::Choice(choice) => draw_choice(frame, choice, full),
         GitOverlay::Commit(commit) => draw_commit(frame, commit, full),
         GitOverlay::Ci(view) => draw_ci(frame, view, full),
+        GitOverlay::Copy(copy) => draw_copy(frame, copy, full),
     }
 }
 
@@ -1226,6 +1566,35 @@ fn draw_input(frame: &mut Frame, input: &GitInput, full: Rect) {
     frame.render_widget(Paragraph::new(Span::styled(INPUT_BUTTONS[1], bold())), buttons[1]);
 }
 
+fn draw_copy(frame: &mut Frame, copy: &CopyDialog, full: Rect) {
+    let area = CopyDialog::rect(full);
+    frame.render_widget(Clear, area);
+    let title = format!(" Задача в отдельной копии · {} ", folder_name(&copy.project));
+    frame.render_widget(frame_block(&title, true), area);
+    let row = |i| CopyDialog::row(full, i);
+    let fields = CopyDialog::fields(full);
+    let field_style = Style::new().add_modifier(Modifier::UNDERLINED);
+    let (hint, style, ready) = copy.branch_hint();
+    frame.render_widget(Paragraph::new("Ветка для задачи:"), row(0));
+    frame.render_widget(Paragraph::new(Span::styled(format!("{} ", copy.branch), field_style)), fields[0]);
+    frame.render_widget(Paragraph::new(Span::styled(hint, style)), row(2));
+    frame.render_widget(Paragraph::new("Подготовка копии:"), row(4));
+    frame.render_widget(Paragraph::new(Span::styled(format!("{} ", copy.setup), field_style)), fields[1]);
+    frame.render_widget(Paragraph::new(Span::styled(copy.setup_hint(), dim())), row(6));
+    if let Some(warning) = copy.warning() {
+        frame.render_widget(Paragraph::new(Span::styled(warning, Style::new().fg(Color::Yellow))), row(8));
+    }
+    let (field, value) = match copy.focus {
+        CopyField::Branch => (fields[0], &copy.branch),
+        CopyField::Setup => (fields[1], &copy.setup),
+    };
+    frame.set_cursor_position(((field.x + width(value)).min(field.right().saturating_sub(1)), field.y));
+    let buttons = CopyDialog::buttons(full);
+    let create = if ready { primary() } else { dim() };
+    frame.render_widget(Paragraph::new(Span::styled(COPY_BUTTONS[0], create)), buttons[0]);
+    frame.render_widget(Paragraph::new(Span::styled(COPY_BUTTONS[1], bold())), buttons[1]);
+}
+
 fn draw_choice(frame: &mut Frame, choice: &GitChoice, full: Rect) {
     let area = choice.rect(full);
     frame.render_widget(Clear, area);
@@ -1293,8 +1662,17 @@ mod tests {
     use super::*;
 
     fn menu_with(status: RepoStatus, branches: Vec<Branch>) -> GitMenu {
-        let mut menu =
-            GitMenu { cwd: PathBuf::new(), status, branches, query: String::new(), cursor: 0, entries: Vec::new(), anchor: Rect::default() };
+        let mut menu = GitMenu {
+            cwd: PathBuf::from("/p"),
+            status,
+            branches,
+            worktrees: Vec::new(),
+            project: Some(PathBuf::from("/p")),
+            query: String::new(),
+            cursor: 0,
+            entries: Vec::new(),
+            anchor: Rect::default(),
+        };
         menu.rebuild();
         menu
     }
@@ -1311,8 +1689,44 @@ mod tests {
         assert_eq!(
             labels,
             ["Получить изменения (fetch)", "Обновить ветку (pull)", "Отправить (push)", "Закоммитить…", "Новая ветка…",
-             "Локальные", "main", "feat", "Удалённые", "origin/dev"]
+             "Задача в отдельной копии…", "Локальные", "main", "feat", "Удалённые", "origin/dev"]
         );
+    }
+
+    #[test]
+    fn current_branch_is_here_even_from_subfolder() {
+        let status = RepoStatus { branch: Some("main".into()), ..Default::default() };
+        let mut menu = menu_with(status, vec![branch("main", true, false)]);
+        menu.cwd = PathBuf::from("/p/apps/web");
+        menu.worktrees = vec![Worktree { path: "/p".into(), branch: Some("main".into()) }];
+        menu.rebuild();
+        assert_eq!(menu.entries.iter().find(|e| e.label == "main").unwrap().hint, "");
+        let main = menu.branches[0].clone();
+        let branch_menu = BranchMenu::new(menu, main);
+        assert!(branch_menu.open_in.is_none());
+        assert_eq!(branch_menu.items[0].0, "Новая ветка от неё…");
+    }
+
+    #[test]
+    fn branch_open_in_copy_leads_there() {
+        let status = RepoStatus { branch: Some("main".into()), ..Default::default() };
+        let mut menu = menu_with(status, vec![branch("main", true, false), branch("feat", false, false)]);
+        menu.worktrees = vec![
+            Worktree { path: "/p".into(), branch: Some("main".into()) },
+            Worktree { path: "/copies/feat".into(), branch: Some("feat".into()) },
+        ];
+        menu.rebuild();
+        let feat = menu.entries.iter().find(|e| e.label == "feat").unwrap();
+        assert_eq!(feat.hint, "в копии");
+        let main = menu.entries.iter().find(|e| e.label == "main").unwrap();
+        assert_eq!(main.hint, "", "здесь открыта — не «в другой папке»");
+
+        let feat = menu.branches[1].clone();
+        let mut overlay = GitOverlay::Branch(BranchMenu::new(menu, feat));
+        let GitOverlay::Branch(branch_menu) = &overlay else { unreachable!() };
+        assert_eq!(branch_menu.items[0].0, "Перейти в её копию");
+        assert!(!branch_menu.items.iter().any(|(_, a)| matches!(a, BranchAction::Switch | BranchAction::OpenCopy)));
+        assert!(matches!(activate_branch(&mut overlay), Command::GoTo(dir) if dir == Path::new("/copies/feat")));
     }
 
     #[test]

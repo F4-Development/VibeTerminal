@@ -14,6 +14,7 @@ mod picker;
 mod reload;
 mod saved;
 mod session;
+mod sessionmenu;
 mod settings;
 mod status;
 mod ui;
@@ -21,6 +22,7 @@ mod usage;
 mod userenv;
 mod view;
 mod voice;
+mod worktree;
 
 const HELP: &str = "\
 vv — VibeTerminal, терминальный пульт для вайбкодинга

@@ -27,14 +27,16 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 use crate::menu::{self, Action};
-use crate::picker::Picker;
+use crate::picker::{self, Picker};
 use crate::reload;
 use crate::saved::{self, SavedSession, SavedWindow};
 use crate::session::{self, Launch, Program, Session, SessionId};
+use crate::sessionmenu::{About, Act, SessionMenu};
 use crate::notify::{self, Notifier};
 use crate::status::{self, State};
 use crate::usage::{self, Limit};
 use crate::voice;
+use crate::worktree;
 use crate::settings::Settings;
 use crate::caps::Caps;
 use crate::ci::{self, CiState, Job};
@@ -124,6 +126,10 @@ pub enum Event {
     AskQuery(SessionId, u64, Sender<String>),
     /// …и присылает ответ; `true` в канал — ответ принят.
     AskAnswer(SessionId, u64, serde_json::Value, Sender<bool>),
+    /// Копия проекта на этой ветке готова (или нет) — открыть в ней сессию.
+    CopyReady(String, Result<worktree::Prepared, String>),
+    /// Копию закрытой сессии удалили (или нет).
+    CopyRemoved(String, Result<(), String>),
     /// Терминал пользователя пропал или vv попросили закрыться.
     Hangup,
 }
@@ -141,6 +147,8 @@ pub enum Overlay {
     Git(GitOverlay),
     /// Лимиты Claude, выбран лимит с этим номером.
     Usage(usize),
+    /// Меню сессии по правому клику в списке.
+    SessionMenu(SessionMenu),
 }
 
 /// Голосовой ввод в сессию.
@@ -685,6 +693,51 @@ impl App {
                 }
                 Ok(true)
             }
+            Event::CopyReady(branch, result) => {
+                match result {
+                    Ok(copy) => {
+                        let args = Settings::load(&self.home).claude_args();
+                        let program = match copy.setup.is_empty() {
+                            true => Program::Claude(args),
+                            false => Program::ClaudeAfter(copy.setup, args),
+                        };
+                        // Коротко: не влезет в нижнюю строку — не покажется. Ветка и так в шапке.
+                        let note = match copy.carried.as_slice() {
+                            [] => "Копия готова".to_string(),
+                            [one] => format!("Копия готова, перенёс {one}"),
+                            [first, rest @ ..] => format!("Копия готова, перенёс {first} и ещё {}", rest.len()),
+                        };
+                        // Копия делалась в фоне. Открыто окно — оно про другую
+                        // сессию (закрыть, удалить копию…): выбор не трогаем.
+                        let busy = !matches!(self.overlay, Overlay::None);
+                        let result = if busy {
+                            self.add_session(branch.clone(), &copy.dir, program)
+                        } else {
+                            self.spawn_session(branch.clone(), &copy.dir, program)
+                        };
+                        match result {
+                            Ok(_) if busy => self.set_flash(format!("Копия «{branch}» готова — она в списке")),
+                            Ok(_) => self.set_flash(note),
+                            Err(err) => self.set_flash(format!("не открылось: {err:#}")),
+                        }
+                    }
+                    Err(text) if matches!(self.overlay, Overlay::None) => {
+                        self.overlay = Overlay::Git(gitui::copy_failed(&text));
+                    }
+                    Err(text) => self.set_flash(format!("Копия не получилась: {text}")),
+                }
+                Ok(true)
+            }
+            Event::CopyRemoved(name, result) => {
+                match result {
+                    Ok(()) => self.set_flash(format!("Копия «{name}» удалена")),
+                    Err(text) if matches!(self.overlay, Overlay::None) => {
+                        self.overlay = Overlay::Git(gitui::remove_failed(&text));
+                    }
+                    Err(_) => self.set_flash(format!("Копия «{name}» не удалилась")),
+                }
+                Ok(true)
+            }
             Event::Hangup => {
                 self.quit = true;
                 Ok(false)
@@ -836,6 +889,13 @@ impl App {
                 let command = gitui::on_key(git, key);
                 return Ok(self.apply_git(command));
             }
+            Overlay::SessionMenu(menu) => match key.code {
+                KeyCode::Esc => self.overlay = Overlay::None,
+                KeyCode::Up => menu.move_by(-1),
+                KeyCode::Down | KeyCode::Tab => menu.move_by(1),
+                KeyCode::Enter => self.session_act(),
+                _ => return Ok(false),
+            },
             Overlay::Menu(cursor) => {
                 let items = menu::items(&self.sessions, self.selected, self.areas.sidebar.is_some());
                 match keys::latin(key.code) {
@@ -875,6 +935,7 @@ impl App {
             },
             Overlay::Picker(picker) => match (key.code, ctrl) {
                 (KeyCode::Esc, _) => self.overlay = Overlay::None,
+                (KeyCode::Enter, _) if key.modifiers.contains(KeyModifiers::ALT) => self.copy_picked(),
                 (KeyCode::Enter, _) => self.open_picked(),
                 (KeyCode::Up, _) | (KeyCode::Char('p' | 'k'), true) => picker.move_by(-1),
                 (KeyCode::Down | KeyCode::Tab, _) | (KeyCode::Char('n' | 'j'), true) => picker.move_by(1),
@@ -894,12 +955,17 @@ impl App {
         match action {
             Action::Select(index) => self.select(index)?,
             Action::New => self.overlay = Overlay::Picker(Picker::new(&self.home)),
+            Action::NewCopy => {
+                if let Some(dir) = self.current().map(|s| s.cwd.clone()) {
+                    self.open_copy(&dir, "");
+                }
+            }
             Action::Rename => {
                 if let Some(session) = self.current() {
                     self.overlay = Overlay::Rename(session.name.clone());
                 }
             }
-            Action::Close if !self.sessions.is_empty() => self.overlay = Overlay::Confirm(Confirm::Close),
+            Action::Close if !self.sessions.is_empty() => self.ask_close(),
             Action::Close => {}
             // Нечего останавливать — выходим без вопроса.
             Action::Quit if self.sessions.is_empty() => self.quit = true,
@@ -932,6 +998,24 @@ impl App {
         Ok(())
     }
 
+    /// Спросить, точно ли закрыть. Сессию в копии проекта — и что делать с копией.
+    fn ask_close(&mut self) {
+        let Some(session) = self.current() else { return };
+        self.overlay = match &session.copy_of {
+            Some(project) if !session.is_command => {
+                // Узнанный недавно статус. Устарел — не беда: без «всё равно»
+                // git не удалит копию, где есть изменения.
+                let status = session.git.clone().or_else(|| git::status(&session.cwd)).unwrap_or_default();
+                let project = picker::folder_name(project);
+                let ours = worktree::is_ours(&self.home, &session.cwd);
+                let foreign = (!ours).then(|| picker::display_path(&session.cwd, &self.home));
+                let (name, branch) = (&session.name, status.head_label());
+                Overlay::Git(gitui::close_copy(name, &project, &branch, status.changed, foreign.as_deref()))
+            }
+            _ => Overlay::Confirm(Confirm::Close),
+        };
+    }
+
     /// «Да» в диалоге: сохранить имя, закрыть сессию или выйти.
     fn confirm_yes(&mut self) {
         match std::mem::replace(&mut self.overlay, Overlay::None) {
@@ -956,11 +1040,106 @@ impl App {
         let Overlay::Picker(picker) = &self.overlay else { return };
         let path = picker.selected_path();
         self.overlay = Overlay::None;
-        if let Some(path) = path
-            && let Err(err) = self.open(&path)
-        {
+        let Some(path) = path else { return };
+        // Там уже работает Claude — второй будет ему мешать.
+        let busy = self.sessions.iter().any(|s| !s.is_command && worktree::same_dir(&s.cwd, &path));
+        if busy && path.join(".git").exists() {
+            self.overlay = Overlay::Git(gitui::folder_busy(&path, &picker::folder_name(&path)));
+            return;
+        }
+        self.open_folder(&path);
+    }
+
+    /// ⌥Enter или кнопка в выборе папки: задача в отдельной копии проекта.
+    fn copy_picked(&mut self) {
+        let Overlay::Picker(picker) = &self.overlay else { return };
+        if let Some(path) = picker.selected_path() {
+            self.open_copy(&path, "");
+        }
+    }
+
+    fn open_folder(&mut self, dir: &Path) {
+        if let Err(err) = self.open(dir) {
             self.set_flash(format!("не открылось: {err:#}"));
         }
+    }
+
+    /// Окно «Задача в отдельной копии» для проекта папки.
+    fn open_copy(&mut self, dir: &Path, branch: &str) {
+        match gitui::open_copy(dir, branch, &self.home) {
+            Some(copy) => self.overlay = Overlay::Git(copy),
+            None => {
+                self.overlay = Overlay::None;
+                self.set_flash("Здесь нет git-репозитория — отдельную копию сделать нельзя");
+            }
+        }
+    }
+
+    /// К сессии в этой папке, а нет такой — открыть её.
+    fn go_to(&mut self, dir: &Path) {
+        match self.sessions.iter().position(|s| !s.is_command && worktree::same_dir(&s.cwd, dir)) {
+            Some(index) => {
+                let _ = self.select(index);
+            }
+            None => self.open_folder(dir),
+        }
+    }
+
+    /// Выбранный пункт меню сессии.
+    fn session_act(&mut self) {
+        let Overlay::SessionMenu(menu) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
+        let act = menu.chosen();
+        // Сессия могла закрыться, пока меню было открыто.
+        let (index, dir) = match &menu.about {
+            About::Session(id) => match self.index_of(*id) {
+                Some(index) => (Some(index), self.sessions[index].cwd.clone()),
+                None => return,
+            },
+            About::Project(project) => (None, project.clone()),
+        };
+        match act {
+            Act::NewCopy => self.open_copy(&dir, ""),
+            Act::ToProject => {
+                if let Some(project) = index.and_then(|i| self.sessions[i].copy_of.clone()) {
+                    self.go_to(&project);
+                }
+            }
+            Act::OpenProject => self.go_to(&dir),
+            Act::Finder => {
+                thread::spawn(move || Command::new("open").arg(&dir).stdout(Stdio::null()).stderr(Stdio::null()).status());
+            }
+            Act::CopyPath => {
+                let copied = Command::new("pbcopy").stdin(Stdio::piped()).spawn().and_then(|mut child| {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin.write_all(dir.as_os_str().as_encoded_bytes())?;
+                    }
+                    child.wait()
+                });
+                let ok = copied.is_ok_and(|status| status.success());
+                self.set_flash(if ok { "Путь скопирован" } else { "Путь не скопировался" });
+            }
+            // Остальное — с открытой сессией: переименовать, git, закрыть.
+            Act::Git | Act::Rename | Act::Close => {
+                let Some(index) = index else { return };
+                let _ = self.select(index);
+                match act {
+                    Act::Git => self.open_git_menu(),
+                    Act::Rename => self.overlay = Overlay::Rename(self.sessions[index].name.clone()),
+                    _ => self.ask_close(),
+                }
+            }
+        }
+    }
+
+    /// Сделать копию в фоне — у большого проекта это секунды — и открыть в ней сессию.
+    fn create_copy(&mut self, from: PathBuf, branch: String, setup: String) {
+        self.overlay = Overlay::None;
+        self.set_flash(format!("Готовлю копию {branch}…"));
+        let (home, tx) = (self.home.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let result = worktree::prepare(&home, &from, &branch, &setup);
+            let _ = tx.send(Event::CopyReady(branch, result));
+        });
     }
 
     fn on_mouse(&mut self, event: MouseEvent, out: &mut impl Write) -> Result<bool> {
@@ -976,6 +1155,25 @@ impl App {
         };
         self.set_pointer(pointer, out)?;
 
+        // Правый клик (или Ctrl+клик, как принято в macOS) по сессии в
+        // списке — её меню. Поверх диалогов не открываем.
+        let context = matches!(event.kind, MouseEventKind::Down(MouseButton::Right))
+            || (matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) && event.modifiers.contains(KeyModifiers::CONTROL));
+        if context && matches!(self.overlay, Overlay::None | Overlay::SessionMenu(_)) {
+            let menu = match ui::slot_at(self, column, row) {
+                Some(ui::Slot::Card(index, _)) => Some(SessionMenu::for_session(&self.sessions[index], (column, row))),
+                Some(ui::Slot::Project(first)) => {
+                    self.sessions[first].copy_of.as_deref().map(|project| SessionMenu::for_project(project, (column, row)))
+                }
+                None => None,
+            };
+            if let Some(menu) = menu {
+                self.overlay = Overlay::SessionMenu(menu);
+                self.hover = None;
+                return Ok(true);
+            }
+        }
+
         match event.kind {
             // Меню и список папок выделяют пункт под мышью.
             MouseEventKind::Moved | MouseEventKind::Drag(_) => match (&mut self.overlay, target) {
@@ -988,6 +1186,10 @@ impl App {
                     dirty = true;
                 }
                 (Overlay::Git(git), Some(Target::Git(t))) => dirty |= gitui::hover(git, t),
+                (Overlay::SessionMenu(menu), Some(Target::SessionMenuItem(i))) if menu.cursor != i => {
+                    menu.cursor = i;
+                    dirty = true;
+                }
                 (Overlay::Usage(cursor), Some(Target::UsageRow(i))) if *cursor != i => {
                     *cursor = i;
                     dirty = true;
@@ -1011,6 +1213,7 @@ impl App {
                     Overlay::Picker(_) => !ui::picker_contains(full, column, row),
                     Overlay::Git(git) => gitui::closes_on_outside_click(git, full, column, row),
                     Overlay::Usage(_) => !ui::usage_contains(self, column, row),
+                    Overlay::SessionMenu(menu) => !contains(menu.rect(full), column, row),
                     _ => false,
                 };
                 if outside {
@@ -1093,6 +1296,13 @@ impl App {
                 }
                 self.open_picked();
             }
+            Target::PickerCopy => self.copy_picked(),
+            Target::SessionMenuItem(index) => {
+                if let Overlay::SessionMenu(menu) = &mut self.overlay {
+                    menu.cursor = index;
+                }
+                self.session_act();
+            }
             Target::DialogYes => self.confirm_yes(),
             Target::DialogNo => self.overlay = Overlay::None,
             Target::Permit(index, decision) => self.answer_permission(index, decision),
@@ -1120,8 +1330,14 @@ impl App {
     /// Новая сессия Claude в папке.
     fn open(&mut self, dir: &Path) -> Result<()> {
         let folder = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
-        let args = Settings::load(&self.home).claude_args();
-        self.spawn_session(folder, dir, Program::Claude(args))
+        let mut args = Settings::load(&self.home).claude_args();
+        // Копия — это задача: вернулся к ней — продолжить тот же разговор.
+        // Если там уже работает Claude, второй в тот же разговор не лезет.
+        let busy = self.sessions.iter().any(|s| !s.is_command && worktree::same_dir(&s.cwd, dir));
+        if !busy && worktree::is_ours(&self.home, dir) && picker::has_dialogs(&self.home, dir) {
+            args.push("--continue".to_string());
+        }
+        self.spawn_session(folder, dir, Program::Claude(args)).map(drop)
     }
 
     /// Перезапуститься новой версией vv тем же процессом, отдав ей сессии:
@@ -1172,7 +1388,9 @@ impl App {
         }
         self.show_sidebar = handoff.show_sidebar;
         let _ = self.relayout(self.areas.full);
-        let _ = self.select(handoff.selected.min(self.sessions.len() - 1));
+        let selected = self.sessions[handoff.selected.min(self.sessions.len() - 1)].id;
+        self.arrange();
+        let _ = self.select(self.index_of(selected).unwrap_or(0));
         // Экран уже как был, но пусть Claude перерисуется — на случай, если
         // что-то вывел, пока vv перезапускался.
         for session in &mut self.sessions {
@@ -1186,23 +1404,29 @@ impl App {
     /// с той же историей. `false` — ни одну открыть не вышло.
     fn restore(&mut self, window: SavedWindow) -> bool {
         let args = Settings::load(&self.home).claude_args();
-        for saved in window.sessions.iter().filter(|s| s.cwd.is_dir()) {
+        // Сессии встают деревом, а каких-то папок уже нет, — номера сдвигаются.
+        // Свою сессию и выбранную ищем по её номеру в vv, а не по месту в списке.
+        let mut selected = None;
+        for (i, saved) in window.sessions.iter().enumerate().filter(|(_, s)| s.cwd.is_dir()) {
             let mut args = args.clone();
             if let Some(id) = saved.resumable() {
                 args.extend(["--resume".to_string(), id.to_string()]);
             }
-            if self.spawn_session(saved.name.clone(), &saved.cwd, Program::Claude(args)).is_ok()
-                && let Some(session) = self.sessions.last_mut()
+            if let Ok(id) = self.spawn_session(saved.name.clone(), &saved.cwd, Program::Claude(args))
+                && let Some(index) = self.index_of(id)
             {
+                let session = &mut self.sessions[index];
                 session.claude_id.clone_from(&saved.claude_id);
                 session.transcript.clone_from(&saved.transcript);
+                if i == window.selected {
+                    selected = Some(id);
+                }
             }
         }
         if self.sessions.is_empty() {
             return false;
         }
-        let selected = window.selected.min(self.sessions.len() - 1);
-        let _ = self.select(selected);
+        let _ = self.select(selected.and_then(|id| self.index_of(id)).unwrap_or(0));
         let note = match self.sessions.len() {
             1 => "Сессия вернулась после перезапуска".to_string(),
             n => format!("Вернул сессии после перезапуска: {n}"),
@@ -1232,7 +1456,15 @@ impl App {
         let _ = saved::save(&self.home, &window);
     }
 
-    fn spawn_session(&mut self, name: String, dir: &Path, program: Program) -> Result<()> {
+    fn spawn_session(&mut self, name: String, dir: &Path, program: Program) -> Result<SessionId> {
+        let id = self.add_session(name, dir, program)?;
+        let index = self.index_of(id).unwrap_or(self.sessions.len() - 1);
+        self.select(index)?;
+        Ok(id)
+    }
+
+    /// Запустить сессию и поставить в список, не открывая её.
+    fn add_session(&mut self, name: String, dir: &Path, program: Program) -> Result<SessionId> {
         let name = self.unique_name(&name);
         let id = self.next_id;
         self.next_id += 1;
@@ -1243,17 +1475,48 @@ impl App {
             let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
         })?;
         self.sessions.push(session);
-        self.select(self.sessions.len() - 1)
+        self.arrange();
+        Ok(id)
+    }
+
+    /// Сессии деревом: копии — сразу под своим проектом. Номера в меню и
+    /// ⌘1–9 идут в том же порядке, что и в списке.
+    fn arrange(&mut self) {
+        let order = ui::tree_order(&ui::tree_keys(&self.sessions));
+        if order.iter().enumerate().all(|(i, &j)| i == j) {
+            return;
+        }
+        let selected = self.current().map(|s| s.id);
+        let mut taken: Vec<Option<Session>> = std::mem::take(&mut self.sessions).into_iter().map(Some).collect();
+        self.sessions = order.into_iter().filter_map(|i| taken[i].take()).collect();
+        if let Some(index) = selected.and_then(|id| self.index_of(id)) {
+            self.selected = index;
+        }
     }
 
     /// Закрыть выбранную сессию: Claude гасим в фоне, чтобы не ждать.
     fn close_current(&mut self) {
+        self.close_selected(None);
+    }
+
+    /// Закрыть выбранную сессию; `Some(force)` — и удалить её копию
+    /// проекта, когда Claude остановится.
+    fn close_selected(&mut self, remove: Option<bool>) {
         if self.selected >= self.sessions.len() {
             return;
         }
         let mut session = self.sessions.remove(self.selected);
-        self.set_flash(format!("«{}» закрыта", session.name));
-        self.stopping.push(thread::spawn(move || session::stop_all(std::slice::from_mut(&mut session))));
+        let copy = remove.zip(session.copy_of.clone()).map(|(force, project)| (project, session.cwd.clone(), force));
+        let name = session.name.clone();
+        let note = if copy.is_some() { format!("«{name}» закрыта, удаляю копию…") } else { format!("«{name}» закрыта") };
+        self.set_flash(note);
+        let tx = self.tx.clone();
+        self.stopping.push(thread::spawn(move || {
+            session::stop_all(std::slice::from_mut(&mut session));
+            if let Some((project, dir, force)) = copy {
+                let _ = tx.send(Event::CopyRemoved(name, worktree::remove(&project, &dir, force)));
+            }
+        }));
         self.after_removal();
     }
 
@@ -1633,6 +1896,33 @@ impl App {
                 if let Err(err) = self.spawn_session(name, &dir, Program::Command(command)) {
                     self.set_flash(format!("не запустилось: {err:#}"));
                 }
+                true
+            }
+            gitui::Command::OpenCopy { from, branch } => {
+                self.open_copy(&from, &branch);
+                true
+            }
+            gitui::Command::NewCopy { from, branch, setup } => {
+                self.create_copy(from, branch, setup);
+                true
+            }
+            gitui::Command::OpenFolder(dir) => {
+                self.overlay = Overlay::None;
+                self.open_folder(&dir);
+                true
+            }
+            gitui::Command::GoTo(dir) => {
+                self.overlay = Overlay::None;
+                self.go_to(&dir);
+                true
+            }
+            gitui::Command::CloseSession(remove) => {
+                self.overlay = Overlay::None;
+                self.close_selected(remove);
+                true
+            }
+            gitui::Command::Ask(next) => {
+                self.overlay = Overlay::Git(GitOverlay::Choice(*next));
                 true
             }
             gitui::Command::AskClaude(text) => {
