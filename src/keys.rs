@@ -1,5 +1,5 @@
-//! Клавиши: перевод событий crossterm обратно в байты для терминала Claude
-//! и работа хоткеев в русской раскладке.
+//! Клавиши: перевод событий crossterm обратно в байты для терминала Claude,
+//! правка строки в полях vv и работа хоткеев в русской раскладке.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -34,6 +34,20 @@ pub fn encode(key: &KeyEvent, application_cursor: bool) -> Vec<u8> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let modifier = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8;
     let mut out = Vec::new();
+
+    // ⌘ в байтах терминала не бывает: правку текста из macOS переводим в
+    // клавиши Emacs, которые понимает Claude, а ⌘ с буквой ничего не
+    // печатает. Выделения в поле Claude нет — с ⇧ то же самое.
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        match key.code {
+            KeyCode::Left => return vec![0x01],
+            KeyCode::Right => return vec![0x05],
+            KeyCode::Backspace => return vec![0x15],
+            KeyCode::Delete => return vec![0x0b],
+            KeyCode::Char(_) => return out,
+            _ => {}
+        }
+    }
 
     match key.code {
         KeyCode::Char(c) => {
@@ -70,6 +84,9 @@ pub fn encode(key: &KeyEvent, application_cursor: bool) -> Vec<u8> {
         KeyCode::Home => cursor_key(&mut out, b'H', modifier, application_cursor),
         KeyCode::End => cursor_key(&mut out, b'F', modifier, application_cursor),
         KeyCode::Insert => tilde_key(&mut out, 2, modifier),
+        // ⌥⌦ — стереть слово справа, как в macOS. `Esc [3;3~` Claude
+        // стирает до конца строки.
+        KeyCode::Delete if alt && !ctrl => out.extend_from_slice(b"\x1bd"),
         KeyCode::Delete => tilde_key(&mut out, 3, modifier),
         KeyCode::PageUp => tilde_key(&mut out, 5, modifier),
         KeyCode::PageDown => tilde_key(&mut out, 6, modifier),
@@ -88,6 +105,51 @@ pub fn encode(key: &KeyEvent, application_cursor: bool) -> Vec<u8> {
         _ => {}
     }
     out
+}
+
+/// Правка в полях ввода vv — имя сессии, поиск проекта, git. Как в полях
+/// macOS: ⌥⌫ стирает слово, ⌘⌫ — всё; и терминальные ⌃W, ⌃U.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    Insert(char),
+    Backspace,
+    DeleteWord,
+    Clear,
+}
+
+pub fn edit(key: &KeyEvent) -> Option<Edit> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+    match key.code {
+        KeyCode::Backspace if cmd => Some(Edit::Clear),
+        KeyCode::Backspace if alt || ctrl => Some(Edit::DeleteWord),
+        KeyCode::Backspace => Some(Edit::Backspace),
+        KeyCode::Char(c) if ctrl => match ru_to_en(c).unwrap_or(c) {
+            'u' => Some(Edit::Clear),
+            'w' => Some(Edit::DeleteWord),
+            _ => None,
+        },
+        // Символы с Option macOS присылает уже готовыми, без Alt.
+        KeyCode::Char(c) if !alt && !cmd => Some(Edit::Insert(c)),
+        _ => None,
+    }
+}
+
+impl Edit {
+    pub fn apply(self, text: &mut String) {
+        match self {
+            Edit::Insert(c) => text.push(c),
+            Edit::Backspace => {
+                text.pop();
+            }
+            Edit::DeleteWord => {
+                let cut = text.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                text.truncate(cut);
+            }
+            Edit::Clear => text.clear(),
+        }
+    }
 }
 
 fn ctrl_byte(c: char) -> Option<u8> {
@@ -181,6 +243,54 @@ mod tests {
         assert_eq!(enc(KeyCode::PageUp, KeyModifiers::SHIFT), b"\x1b[5;2~");
         assert_eq!(enc(KeyCode::F(1), KeyModifiers::NONE), b"\x1bOP");
         assert_eq!(enc(KeyCode::F(5), KeyModifiers::NONE), b"\x1b[15~");
+    }
+
+    #[test]
+    fn macos_text_editing() {
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        let cmd_shift = KeyModifiers::SUPER | KeyModifiers::SHIFT;
+        // ⌥⌫, ⌥⌦ — слово слева и справа.
+        assert_eq!(enc(KeyCode::Backspace, KeyModifiers::ALT), b"\x1b\x7f");
+        assert_eq!(enc(KeyCode::Backspace, alt_shift), b"\x1b\x7f");
+        assert_eq!(enc(KeyCode::Delete, KeyModifiers::ALT), b"\x1bd");
+        // ⌥←, ⌥⇧← — по словам.
+        assert_eq!(enc(KeyCode::Left, KeyModifiers::ALT), b"\x1b[1;3D");
+        assert_eq!(enc(KeyCode::Right, alt_shift), b"\x1b[1;4C");
+        // ⌘ — начало и конец строки, стереть до них.
+        assert_eq!(enc(KeyCode::Left, KeyModifiers::SUPER), [0x01]);
+        assert_eq!(enc(KeyCode::Right, cmd_shift), [0x05]);
+        assert_eq!(enc(KeyCode::Backspace, KeyModifiers::SUPER), [0x15]);
+        assert_eq!(enc(KeyCode::Delete, KeyModifiers::SUPER), [0x0b]);
+        // ⌘ с буквой не печатает её.
+        assert_eq!(enc(KeyCode::Char('e'), KeyModifiers::SUPER), b"");
+        assert_eq!(enc(KeyCode::Char('s'), cmd_shift), b"");
+        assert_eq!(enc(KeyCode::Enter, KeyModifiers::SUPER), b"\r");
+    }
+
+    #[test]
+    fn line_editing_in_vv_fields() {
+        let edit_of = |code, modifiers| edit(&key(code, modifiers));
+        assert_eq!(edit_of(KeyCode::Char('ж'), KeyModifiers::NONE), Some(Edit::Insert('ж')));
+        assert_eq!(edit_of(KeyCode::Char('A'), KeyModifiers::SHIFT), Some(Edit::Insert('A')));
+        assert_eq!(edit_of(KeyCode::Backspace, KeyModifiers::NONE), Some(Edit::Backspace));
+        assert_eq!(edit_of(KeyCode::Backspace, KeyModifiers::ALT), Some(Edit::DeleteWord));
+        assert_eq!(edit_of(KeyCode::Backspace, KeyModifiers::SUPER), Some(Edit::Clear));
+        assert_eq!(edit_of(KeyCode::Char('w'), KeyModifiers::CONTROL), Some(Edit::DeleteWord));
+        assert_eq!(edit_of(KeyCode::Char('г'), KeyModifiers::CONTROL), Some(Edit::Clear));
+        assert_eq!(edit_of(KeyCode::Char('e'), KeyModifiers::SUPER), None);
+        assert_eq!(edit_of(KeyCode::Char('b'), KeyModifiers::ALT), None);
+        assert_eq!(edit_of(KeyCode::Char('c'), KeyModifiers::CONTROL), None);
+
+        let mut text = "fix the  bug ".to_string();
+        Edit::DeleteWord.apply(&mut text);
+        assert_eq!(text, "fix the  ");
+        Edit::DeleteWord.apply(&mut text);
+        assert_eq!(text, "fix ");
+        Edit::Backspace.apply(&mut text);
+        Edit::Insert('!').apply(&mut text);
+        assert_eq!(text, "fix!");
+        Edit::DeleteWord.apply(&mut text);
+        assert_eq!(text, "");
     }
 
     #[test]

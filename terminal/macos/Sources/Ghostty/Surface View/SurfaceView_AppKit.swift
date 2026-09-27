@@ -1414,8 +1414,13 @@ extension Ghostty {
             // For text, we only encode UTF8 if we don't have a single control
             // character. Control characters are encoded by Ghostty itself.
             // Without this, `ctrl+enter` does the wrong thing.
+            //
+            // VibeTerminal: DEL (0x7F) — тоже управляющий. ⌫ даёт его как
+            // текст, и при раскладке, где Option печатает символы (русская),
+            // Option считался потраченным на этот текст: ⌥⌫ уходила голым
+            // Backspace вместо «стереть слово». Так же исправлено в Ghostty.
             if let text, text.count > 0,
-               let codepoint = text.utf8.first, codepoint >= 0x20 {
+               let codepoint = text.utf8.first, codepoint >= 0x20, codepoint != 0x7F {
                 return text.withCString { ptr in
                     key_ev.text = ptr
                     return ghostty_surface_key(surface, key_ev)

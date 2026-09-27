@@ -7159,6 +7159,26 @@ pub const Keybinds = struct {
                 .{ .key = .{ .physical = .arrow_right }, .mods = .{ .alt = true } },
                 .{ .esc = "f" },
             );
+
+            // VibeTerminal: остальная правка текста macOS. Назначением, а не
+            // кодировщиком: при раскладке, где Option печатает символы (ABC,
+            // русская), кодировщик теряет Option у ⌫, и ⌥⌫ стирала букву
+            // вместо слова. ⌦ — клавиша Delete (fn⌫).
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .backspace }, .mods = .{ .alt = true } },
+                .{ .text = "\\x1b\\x7f" },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .delete }, .mods = .{ .alt = true } },
+                .{ .esc = "d" },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .delete }, .mods = .{ .super = true } },
+                .{ .text = "\\x0b" },
+            );
         }
     }
 

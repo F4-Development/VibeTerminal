@@ -45,7 +45,8 @@ use crate::gitui::{self, GitOverlay};
 use crate::hooks::{self, Decision, HookEvent, HookServer, PermissionRequest, StatusLine};
 use crate::hotkeys::{self, Hotkey};
 use crate::ui::{self, Areas, Target, contains};
-use crate::{keys, mouse};
+use crate::keys::{self, Edit};
+use crate::mouse;
 
 /// Кнопки, колесо и движение мыши в формате SGR. Движение нужно, чтобы
 /// подсвечивать то, что под мышью; Claude получает его, только если просил.
@@ -922,16 +923,10 @@ impl App {
             Overlay::Rename(input) => match key.code {
                 KeyCode::Esc => self.overlay = Overlay::None,
                 KeyCode::Enter => self.confirm_yes(),
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                KeyCode::Char('u') if ctrl => input.clear(),
-                KeyCode::Char('w') if ctrl => {
-                    let cut = input.trim_end().rfind(' ').map_or(0, |i| i + 1);
-                    input.truncate(cut);
-                }
-                KeyCode::Char(c) if !ctrl => input.push(c),
-                _ => return Ok(false),
+                _ => match keys::edit(&key) {
+                    Some(edit) => edit.apply(input),
+                    None => return Ok(false),
+                },
             },
             Overlay::Picker(picker) => match (key.code, ctrl) {
                 (KeyCode::Esc, _) => self.overlay = Overlay::None,
@@ -939,11 +934,14 @@ impl App {
                 (KeyCode::Enter, _) => self.open_picked(),
                 (KeyCode::Up, _) | (KeyCode::Char('p' | 'k'), true) => picker.move_by(-1),
                 (KeyCode::Down | KeyCode::Tab, _) | (KeyCode::Char('n' | 'j'), true) => picker.move_by(1),
-                (KeyCode::Backspace, _) => picker.backspace(),
-                (KeyCode::Char('u'), true) => picker.clear(),
-                (KeyCode::Char('w'), true) => picker.delete_word(),
-                (KeyCode::Char(c), false) => picker.push(c.encode_utf8(&mut [0; 4])),
-                _ => return Ok(false),
+                _ => match keys::edit(&key) {
+                    Some(Edit::Insert(c)) => picker.push(c.encode_utf8(&mut [0; 4])),
+                    Some(Edit::Backspace) => picker.backspace(),
+                    // Слово в пути — до `/`.
+                    Some(Edit::DeleteWord) => picker.delete_word(),
+                    Some(Edit::Clear) => picker.clear(),
+                    None => return Ok(false),
+                },
             },
         }
         Ok(true)

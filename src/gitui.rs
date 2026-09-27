@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -1047,7 +1047,6 @@ pub fn open_commit(cwd: PathBuf, status: &RepoStatus) -> GitOverlay {
 // ── Клавиши ───────────────────────────────────────────────────────────────
 
 pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match overlay {
         GitOverlay::Menu(menu) => match key.code {
             KeyCode::Esc => Command::Close,
@@ -1060,22 +1059,14 @@ pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
                 Command::Redraw
             }
             KeyCode::Enter | KeyCode::Right => activate_menu(overlay),
-            KeyCode::Backspace => {
-                menu.query.pop();
-                menu.rebuild();
-                Command::Redraw
-            }
-            KeyCode::Char('u') if ctrl => {
-                menu.query.clear();
-                menu.rebuild();
-                Command::Redraw
-            }
-            KeyCode::Char(c) if !ctrl => {
-                menu.query.push(c);
-                menu.rebuild();
-                Command::Redraw
-            }
-            _ => Command::None,
+            _ => match keys::edit(&key) {
+                Some(edit) => {
+                    edit.apply(&mut menu.query);
+                    menu.rebuild();
+                    Command::Redraw
+                }
+                None => Command::None,
+            },
         },
         GitOverlay::Branch(branch) => match key.code {
             KeyCode::Esc | KeyCode::Left => {
@@ -1096,19 +1087,7 @@ pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
         GitOverlay::Input(input) => match key.code {
             KeyCode::Esc => Command::Close,
             KeyCode::Enter => input.submit(),
-            KeyCode::Backspace => {
-                input.value.pop();
-                Command::Redraw
-            }
-            KeyCode::Char('u') if ctrl => {
-                input.value.clear();
-                Command::Redraw
-            }
-            KeyCode::Char(c) if !ctrl => {
-                input.value.push(c);
-                Command::Redraw
-            }
-            _ => Command::None,
+            _ => edit_field(&mut input.value, &key),
         },
         GitOverlay::Copy(copy) => match key.code {
             KeyCode::Esc => Command::Close,
@@ -1117,19 +1096,7 @@ pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
                 copy.focus = if copy.focus == CopyField::Branch { CopyField::Setup } else { CopyField::Branch };
                 Command::Redraw
             }
-            KeyCode::Backspace => {
-                copy.field().pop();
-                Command::Redraw
-            }
-            KeyCode::Char('u') if ctrl => {
-                copy.field().clear();
-                Command::Redraw
-            }
-            KeyCode::Char(c) if !ctrl => {
-                copy.field().push(c);
-                Command::Redraw
-            }
-            _ => Command::None,
+            _ => edit_field(copy.field(), &key),
         },
         GitOverlay::Choice(choice) => match key.code {
             KeyCode::Esc => Command::Close,
@@ -1182,20 +1149,19 @@ pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
                 }
                 Command::Redraw
             }
-            (KeyCode::Backspace, CommitFocus::Message) => {
-                commit.message.pop();
-                Command::Redraw
-            }
-            (KeyCode::Char('u'), CommitFocus::Message) if ctrl => {
-                commit.message.clear();
-                Command::Redraw
-            }
-            (KeyCode::Char(c), CommitFocus::Message) if !ctrl => {
-                commit.message.push(c);
-                Command::Redraw
-            }
+            (_, CommitFocus::Message) => edit_field(&mut commit.message, &key),
             _ => Command::None,
         },
+    }
+}
+
+fn edit_field(field: &mut String, key: &KeyEvent) -> Command {
+    match keys::edit(key) {
+        Some(edit) => {
+            edit.apply(field);
+            Command::Redraw
+        }
+        None => Command::None,
     }
 }
 
