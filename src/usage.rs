@@ -206,11 +206,11 @@ pub fn reset_text(at: i64) -> String {
     format!("сброс {day} · через {rest}")
 }
 
-fn now() -> i64 {
+pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-fn local(at: i64) -> Option<libc::tm> {
+pub fn local(at: i64) -> Option<libc::tm> {
     let time = at as libc::time_t;
     // SAFETY: localtime_r пишет только в переданную структуру.
     unsafe {
@@ -219,7 +219,7 @@ fn local(at: i64) -> Option<libc::tm> {
     }
 }
 
-fn make_time(mut tm: libc::tm) -> Option<i64> {
+pub fn make_time(mut tm: libc::tm) -> Option<i64> {
     // SAFETY: mktime читает и нормализует только переданную структуру.
     let at = unsafe { libc::mktime(&mut tm) };
     (at != -1).then_some(at as i64)

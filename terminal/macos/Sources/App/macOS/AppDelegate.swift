@@ -992,6 +992,11 @@ class AppDelegate: NSObject,
         AboutController.shared.show()
     }
 
+    @IBAction func showClaudeStats(_ sender: Any?) {
+        // VibeTerminal: сколько токенов ушло на Claude и во что это обошлось бы по API.
+        VibeStatsController.show()
+    }
+
     @IBAction func showHelp(_ sender: Any) {
         guard let url = URL(string: "https://ghostty.org/docs") else { return }
         NSWorkspace.shared.open(url)

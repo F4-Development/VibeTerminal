@@ -502,6 +502,13 @@
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <menu key="submenu" title="Справка" systemMenu="help" id="F2S-fz-NVQ">
                         <items>
+                            <menuItem title="Статистика Claude…" id="VbS-tA-tCl">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <connections>
+                                    <action selector="showClaudeStats:" target="bbz-4X-AYv" id="VbS-tA-act"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem isSeparatorItem="YES" id="VbS-tA-sep"/>
                             <menuItem title="Справка VibeTerminal" keyEquivalent="?" id="FKE-Sm-Kum">
                                 <connections>
                                     <action selector="showHelp:" target="bbz-4X-AYv" id="tiy-ow-xSw"/>

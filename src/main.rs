@@ -16,6 +16,7 @@ mod saved;
 mod session;
 mod sessionmenu;
 mod settings;
+mod stats;
 mod status;
 mod ui;
 mod usage;
@@ -44,6 +45,8 @@ fn main() -> anyhow::Result<()> {
             "-h" | "--help" => print!("{HELP}"),
             // Зовёт Claude Code из хуков, руками не нужен.
             "hook" => hooks::run_hook(&std::env::args().nth(2).unwrap_or_default()),
+            // Зовёт окно «Статистика Claude» в приложении: печатает JSON.
+            "stats" => stats::run()?,
             other => {
                 eprintln!("vv: неизвестный аргумент «{other}»\n\n{HELP}");
                 std::process::exit(2);
