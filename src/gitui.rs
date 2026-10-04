@@ -17,7 +17,7 @@ use crate::git::{self, Branch, ChangedFile, Failure, GitOp, OpError, Operation, 
 use crate::keys;
 use crate::picker::{folder_name, score};
 use crate::ui::{accent, bold, centered, contains, dim, frame_block, primary, width};
-use crate::worktree::{self, Start, Worktree};
+use crate::worktree::{self, Start, WorkBranch, Worktree};
 
 const MENU_WIDTH: u16 = 62;
 const DIALOG_WIDTH: u16 = 66;
@@ -412,16 +412,20 @@ pub struct GitChoice {
     lines: Vec<String>,
     buttons: Vec<(String, ChoiceAction)>,
     cursor: usize,
+    /// Кнопки столбиком — когда это список, а не «да / нет».
+    column: bool,
 }
 
 pub enum ChoiceAction {
     Run(GitOp),
     AskClaude(String),
     Terminal { name: String, command: String },
-    /// Окно «Задача в отдельной копии» для проекта этой папки.
-    Copy(PathBuf),
+    /// Окно «Задача в отдельной копии» для проекта этой папки; ветка — если уже известна.
+    Copy(PathBuf, String),
     /// Открыть сессию прямо в этой папке.
     OpenHere(PathBuf),
+    /// К сессии в этой папке, а нет такой — открыть её.
+    GoTo(PathBuf),
     /// Закрыть открытую сессию; `Some(force)` — и удалить её копию проекта.
     CloseSession(Option<bool>),
     /// Задать следующий вопрос.
@@ -433,7 +437,15 @@ impl GitChoice {
     fn new(title: &str, text: &str, buttons: Vec<(&str, ChoiceAction)>) -> Self {
         let lines = wrap(text, (DIALOG_WIDTH - 4) as usize);
         let buttons = buttons.into_iter().map(|(label, action)| (format!(" {label} "), action)).collect();
-        Self { title: format!(" {title} "), lines, buttons, cursor: 0 }
+        Self { title: format!(" {title} "), lines, buttons, cursor: 0, column: false }
+    }
+
+    /// Выбор из списка: кнопки столбиком.
+    fn list(title: &str, text: &str, buttons: Vec<(String, ChoiceAction)>) -> Self {
+        let mut choice = Self::new(title, text, Vec::new());
+        choice.buttons = buttons.into_iter().map(|(label, action)| (format!(" {label} "), action)).collect();
+        choice.column = true;
+        choice
     }
 
     fn choose(&mut self, index: usize) -> Command {
@@ -444,8 +456,9 @@ impl GitChoice {
             ChoiceAction::Run(op) => Command::Run(op),
             ChoiceAction::AskClaude(text) => Command::AskClaude(text),
             ChoiceAction::Terminal { name, command } => Command::Terminal { name, command },
-            ChoiceAction::Copy(from) => Command::OpenCopy { from, branch: String::new() },
+            ChoiceAction::Copy(from, branch) => Command::OpenCopy { from, branch },
             ChoiceAction::OpenHere(dir) => Command::OpenFolder(dir),
+            ChoiceAction::GoTo(dir) => Command::GoTo(dir),
             ChoiceAction::CloseSession(remove) => Command::CloseSession(remove),
             ChoiceAction::Ask(next) => Command::Ask(next),
             ChoiceAction::Close => Command::Close,
@@ -453,12 +466,18 @@ impl GitChoice {
     }
 
     fn rect(&self, full: Rect) -> Rect {
-        // Рамка, текст, пустая строка, кнопки.
-        centered(full, DIALOG_WIDTH, self.lines.len() as u16 + 4)
+        // Рамка, текст, пустая строка, кнопки — в строку или столбиком.
+        let rows = if self.column { self.buttons.len() } else { 1 };
+        centered(full, DIALOG_WIDTH, (self.lines.len() + rows) as u16 + 3)
     }
 
     fn buttons(&self, full: Rect) -> Vec<Rect> {
         let inner = frame_block("", true).inner(self.rect(full));
+        if self.column {
+            let top = inner.bottom().saturating_sub(self.buttons.len() as u16);
+            let rows = self.buttons.iter().enumerate();
+            return rows.map(|(i, (label, _))| Rect::new(inner.x + 1, top + i as u16, width(label), 1)).collect();
+        }
         let y = inner.bottom().saturating_sub(1);
         let mut x = inner.x + 1;
         self.buttons
@@ -851,11 +870,75 @@ pub fn folder_busy(dir: &Path, name: &str) -> GitOverlay {
         "Два Claude в одной папке правят одни и те же файлы и мешают друг другу. \
          В отдельной копии у задачи будет своя ветка и свои файлы.",
         vec![
-            ("В отдельной копии", ChoiceAction::Copy(dir.to_path_buf())),
+            ("В отдельной копии", ChoiceAction::Copy(dir.to_path_buf(), String::new())),
             ("Всё равно в этой папке", ChoiceAction::OpenHere(dir.to_path_buf())),
             ("Отмена", ChoiceAction::Close),
         ],
     ))
+}
+
+/// Сколько рабочих веток показать — остальные есть в меню веток.
+const WORK_SHOWN: usize = 6;
+
+/// У проекта есть работа, которой не видно в его папке: спросить, где
+/// продолжить. Сверху — где был последний коммит, по Enter — туда.
+/// `here` — что открыто в папке и когда там был последний коммит; `busy` —
+/// в папке уже работает Claude: строка папки ведёт к нему, а второй Claude
+/// и новая копия — отдельными пунктами, как в «Уже работает Claude».
+pub fn work_elsewhere(dir: &Path, here: (&str, Option<u64>), busy: bool, work: &[WorkBranch], now: u64) -> GitOverlay {
+    let mut rows: Vec<(u64, String, ChoiceAction)> = work
+        .iter()
+        .take(WORK_SHOWN)
+        .map(|w| {
+            let (place, action) = match &w.copy {
+                Some(copy) => ("копия", ChoiceAction::GoTo(copy.clone())),
+                None => ("открыть в копии…", ChoiceAction::Copy(dir.to_path_buf(), w.name.clone())),
+            };
+            (w.at, format!("⎇ {} · {place} · {}", clip(&w.name, 24), ago(w.at, now)), action)
+        })
+        .collect();
+    let (branch, at) = here;
+    let when = at.map(|at| format!(" · {}", ago(at, now))).unwrap_or_default();
+    let (folder, open) = match busy {
+        true => ("К открытой сессии", ChoiceAction::GoTo(dir.to_path_buf())),
+        false => ("Папка проекта", ChoiceAction::OpenHere(dir.to_path_buf())),
+    };
+    rows.push((at.unwrap_or(0), format!("⌂ {folder} · ⎇ {}{when}", clip(branch, 24)), open));
+    rows.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
+    let mut buttons: Vec<(String, ChoiceAction)> = rows.into_iter().map(|(_, label, action)| (label, action)).collect();
+    if busy {
+        buttons.push(("+ Новая отдельная копия…".into(), ChoiceAction::Copy(dir.to_path_buf(), String::new())));
+        buttons.push(("Второй Claude в этой папке".into(), ChoiceAction::OpenHere(dir.to_path_buf())));
+    }
+    buttons.push(("Отмена".into(), ChoiceAction::Close));
+    let more = match work.len().saturating_sub(WORK_SHOWN) {
+        0 => String::new(),
+        more => format!(" Ещё {more} — в меню веток."),
+    };
+    let claude = if busy { ", в ней уже работает Claude" } else { "" };
+    GitOverlay::Choice(GitChoice::list(
+        &format!("Рабочие ветки {}", folder_name(dir)),
+        &format!("В папке открыта {branch}{claude}. Работа идёт и в других ветках.\nСверху — где был последний коммит.{more}"),
+        buttons,
+    ))
+}
+
+/// «только что», «5 мин назад», «3 ч назад», «2 дн назад».
+fn ago(at: u64, now: u64) -> String {
+    match now.saturating_sub(at) / 60 {
+        0 => "только что".into(),
+        minutes @ 1..60 => format!("{minutes} мин назад"),
+        minutes @ 60..1440 => format!("{} ч назад", minutes / 60),
+        minutes => format!("{} дн назад", minutes / 1440),
+    }
+}
+
+/// Не длиннее `max` знаков: лишнее — «…».
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max - 1).chain(['…']).collect()
 }
 
 // ── CI ────────────────────────────────────────────────────────────────────
@@ -1100,11 +1183,11 @@ pub fn on_key(overlay: &mut GitOverlay, key: KeyEvent) -> Command {
         },
         GitOverlay::Choice(choice) => match key.code {
             KeyCode::Esc => Command::Close,
-            KeyCode::Left => {
+            KeyCode::Left | KeyCode::Up => {
                 choice.cursor = choice.cursor.saturating_sub(1);
                 Command::Redraw
             }
-            KeyCode::Right | KeyCode::Tab => {
+            KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
                 choice.cursor = (choice.cursor + 1).min(choice.buttons.len() - 1);
                 Command::Redraw
             }
@@ -1216,7 +1299,7 @@ fn activate_menu(overlay: &mut GitOverlay) -> Command {
 }
 
 fn empty_choice() -> GitChoice {
-    GitChoice { title: String::new(), lines: Vec::new(), buttons: Vec::new(), cursor: 0 }
+    GitChoice { title: String::new(), lines: Vec::new(), buttons: Vec::new(), cursor: 0, column: false }
 }
 
 fn back_to_menu(overlay: &mut GitOverlay) {
@@ -1783,4 +1866,50 @@ mod tests {
         assert!(view.jobs.is_none() && view.wants_jobs(), "новый пайплайн после push показывается сразу");
     }
 
+    #[test]
+    fn work_elsewhere_puts_last_work_first() {
+        let now = 100 * 24 * 3600;
+        let work = [
+            WorkBranch { name: "task-2813".into(), copy: Some("/w/task-2813".into()), at: now - 3 * 3600 },
+            WorkBranch { name: "hero-fire".into(), copy: None, at: now - 6 * 24 * 3600 },
+        ];
+        let labels = |here_at: u64| {
+            let GitOverlay::Choice(choice) = work_elsewhere(Path::new("/p/shop"), ("main", Some(here_at)), false, &work, now) else {
+                panic!("не выбор");
+            };
+            assert_eq!(choice.title, " Рабочие ветки shop ");
+            choice.buttons.into_iter().map(|(label, _)| label.trim().to_string()).collect::<Vec<_>>()
+        };
+        // В копии коммитили позже, чем в папке, — по Enter в копию.
+        assert_eq!(
+            labels(now - 2 * 24 * 3600),
+            [
+                "⎇ task-2813 · копия · 3 ч назад",
+                "⌂ Папка проекта · ⎇ main · 2 дн назад",
+                "⎇ hero-fire · открыть в копии… · 6 дн назад",
+                "Отмена",
+            ]
+        );
+        // В папке — свежее всего: по Enter туда.
+        assert_eq!(labels(now - 60)[0], "⌂ Папка проекта · ⎇ main · 1 мин назад");
+        assert_eq!(clip("review/task-2813-очень-длинная", 10), "review/ta…");
+
+        // В папке уже работает Claude: к нему, новая копия или второй Claude.
+        let GitOverlay::Choice(busy) = work_elsewhere(Path::new("/p/shop"), ("main", Some(now - 60)), true, &work, now) else {
+            panic!("не выбор");
+        };
+        let labels: Vec<_> = busy.buttons.iter().map(|(label, _)| label.trim()).collect();
+        assert_eq!(
+            labels,
+            [
+                "⌂ К открытой сессии · ⎇ main · 1 мин назад",
+                "⎇ task-2813 · копия · 3 ч назад",
+                "⎇ hero-fire · открыть в копии… · 6 дн назад",
+                "+ Новая отдельная копия…",
+                "Второй Claude в этой папке",
+                "Отмена",
+            ]
+        );
+        assert!(matches!(busy.buttons[0].1, ChoiceAction::GoTo(_)));
+    }
 }

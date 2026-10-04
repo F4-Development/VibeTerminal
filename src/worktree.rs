@@ -353,6 +353,58 @@ pub fn prepare(home: &Path, from: &Path, branch: &str, setup: &str) -> Result<Pr
     Ok(Prepared { dir, carried, setup: setup.to_string() })
 }
 
+// ── Рабочие ветки проекта ─────────────────────────────────────────────────
+
+/// Не слитая ветка без коммитов дольше этого — уже не рабочая: о ней не
+/// спрашиваем, она есть в меню веток.
+const FRESH_FOR: u64 = 14 * 24 * 3600;
+
+/// Ветка, где идёт работа, которой не видно в папке проекта.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkBranch {
+    pub name: String,
+    /// Копия, где ветка открыта; `None` — не открыта нигде.
+    pub copy: Option<PathBuf>,
+    /// Последний коммит, unix-время.
+    pub at: u64,
+}
+
+/// Рабочие ветки проекта папки `dir`, свежие первыми: открытые в других
+/// копиях и свежие локальные, не слитые в то, что открыто в папке.
+pub fn work_branches(dir: &Path, now: u64) -> Vec<WorkBranch> {
+    let format = "--format=%(refname:short)%00%(committerdate:unix)%00%(worktreepath)";
+    let (Ok(all), Ok(unmerged), Ok(top)) = (
+        git::run(dir, &["for-each-ref", format, "refs/heads"]),
+        git::run(dir, &["for-each-ref", "--no-merged=HEAD", "--format=%(refname:short)", "refs/heads"]),
+        git::run(dir, &["rev-parse", "--show-toplevel"]),
+    ) else {
+        return Vec::new();
+    };
+    let unmerged: Vec<&str> = unmerged.lines().collect();
+    let top = PathBuf::from(top.trim());
+    let mut work: Vec<WorkBranch> = all
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\0');
+            let (name, at) = (fields.next()?, fields.next()?.parse().ok()?);
+            let copy = fields.next().filter(|p| !p.is_empty()).map(PathBuf::from);
+            let working = match &copy {
+                // Папку копии могли удалить руками — git о ней ещё помнит.
+                Some(copy) => !same_dir(copy, &top) && copy.exists(),
+                None => unmerged.contains(&name) && now.saturating_sub(at) <= FRESH_FOR,
+            };
+            working.then(|| WorkBranch { name: name.to_string(), copy, at })
+        })
+        .collect();
+    work.sort_by_key(|w| std::cmp::Reverse(w.at));
+    work
+}
+
+/// Когда был последний коммит того, что открыто в папке.
+pub fn last_commit(dir: &Path) -> Option<u64> {
+    git::run(dir, &["log", "-1", "--format=%ct"]).ok()?.trim().parse().ok()
+}
+
 /// `feat-login`, а если такая папка уже есть — `feat-login-2`…
 fn free_path(path: &Path) -> PathBuf {
     if !path.exists() {
@@ -506,6 +558,41 @@ mod tests {
         assert!(!third.exists() && !fourth.exists());
         assert_eq!(kept(&home).len(), 2);
         assert!(git::branches(&repo).iter().any(|b| b.name == "env"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Рабочие ветки: копия — всегда, не слитая — пока свежая, слитая — нет.
+    #[test]
+    fn finds_work_outside_the_folder() {
+        let base = std::env::temp_dir().join(format!("vv-work-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, repo) = (base.join("home"), base.join("shop"));
+        std::fs::create_dir_all(&repo).unwrap();
+        git::run(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&repo, &["config", "user.email", "t@t"]).unwrap();
+        git::run(&repo, &["config", "user.name", "t"]).unwrap();
+        git::run(&repo, &["commit", "-q", "--allow-empty", "-m", "первый"]).unwrap();
+        git::run(&repo, &["branch", "merged"]).unwrap();
+        git::run(&repo, &["switch", "-q", "-c", "feat"]).unwrap();
+        git::run(&repo, &["commit", "-q", "--allow-empty", "-m", "работа"]).unwrap();
+        git::run(&repo, &["switch", "-q", "main"]).unwrap();
+        let copy = create(&home, &repo, "task").unwrap();
+
+        let now = last_commit(&repo).unwrap();
+        let names = |work: Vec<WorkBranch>| {
+            let mut names: Vec<_> = work.into_iter().map(|w| (w.name, w.copy.is_some())).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(work_branches(&repo, now)), [("feat".into(), false), ("task".into(), true)]);
+        // Из подпапки — то же.
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        assert_eq!(names(work_branches(&repo.join("src"), now)).len(), 2);
+        // Через месяц не слитая ветка уже не рабочая, а копия — по-прежнему.
+        assert_eq!(names(work_branches(&repo, now + 30 * 24 * 3600)), [("task".into(), true)]);
+        // Папку копии удалили руками — её нет.
+        std::fs::remove_dir_all(&copy).unwrap();
+        assert_eq!(names(work_branches(&repo, now)), [("feat".into(), false)]);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

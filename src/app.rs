@@ -1050,11 +1050,35 @@ impl App {
         let Some(path) = path else { return };
         // Там уже работает Claude — второй будет ему мешать.
         let busy = self.sessions.iter().any(|s| !s.is_command && worktree::same_dir(&s.cwd, &path));
+        // Работа по проекту шла в другой ветке — не открыть по ошибке не там.
+        if let Some(dialog) = self.work_elsewhere(&path, busy) {
+            self.overlay = Overlay::Git(dialog);
+            return;
+        }
         if busy && path.join(".git").exists() {
             self.overlay = Overlay::Git(gitui::folder_busy(&path, &picker::folder_name(&path)));
             return;
         }
         self.open_folder(&path);
+    }
+
+    /// Окно «Рабочие ветки», если у проекта папки есть работа, которой в ней
+    /// не видно: копии без открытой сессии и свежие не слитые ветки.
+    /// `busy` — в самой папке уже работает Claude.
+    fn work_elsewhere(&self, dir: &Path, busy: bool) -> Option<GitOverlay> {
+        // Копию открывают ради её ветки — спрашивать не о чем.
+        if worktree::main_repo(dir).is_some() {
+            return None;
+        }
+        let now = usage::now() as u64;
+        let open = |copy: &Path| self.sessions.iter().any(|s| !s.is_command && worktree::same_dir(&s.cwd, copy));
+        let work: Vec<_> =
+            worktree::work_branches(dir, now).into_iter().filter(|w| !w.copy.as_deref().is_some_and(open)).collect();
+        if work.is_empty() {
+            return None;
+        }
+        let here = git::status(dir).unwrap_or_default().head_label();
+        Some(gitui::work_elsewhere(dir, (&here, worktree::last_commit(dir)), busy, &work, now))
     }
 
     /// ⌥Enter или кнопка в выборе папки: задача в отдельной копии проекта.
