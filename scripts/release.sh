@@ -24,6 +24,9 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 TAG="v$VERSION"
 ZIP="$ROOT/dist/VibeTerminal-$VERSION.zip"
 
+# Только Developer ID: «Apple Development» не проходит нотаризацию (и
+# build-app.sh тоже его не возьмёт — переменная передаётся ему).
+export SIGN_RELEASE=1
 source "$ROOT/scripts/signing.sh"
 if [[ -n "$SIGN_IDENTITY" ]]; then
     xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \

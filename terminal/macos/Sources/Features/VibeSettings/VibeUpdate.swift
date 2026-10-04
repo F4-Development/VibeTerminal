@@ -258,13 +258,19 @@ final class VibeUpdater: ObservableObject {
         NSApp.terminate(nil)
     }
 
-    /// Команда разработчика из подписи этого приложения; `nil` — локальная
-    /// сборка без Developer ID.
+    /// Команда разработчика из подписи этого приложения; `nil` — сборка без
+    /// Developer ID: локальная или «Apple Development» (релизы такой не подписаны).
     static let team: String? = {
+        let developerID = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]"
+            + " and certificate leaf[field.1.2.840.113635.100.6.1.13]"
         var code: SecCode?
+        var requirement: SecRequirement?
         var staticCode: SecStaticCode?
         var info: CFDictionary?
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecRequirementCreateWithString(developerID as CFString, [], &requirement) == errSecSuccess,
+              let requirement,
+              SecCodeCheckValidity(code, [], requirement) == errSecSuccess,
               SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
               SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess
         else { return nil }
