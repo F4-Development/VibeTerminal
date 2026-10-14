@@ -43,6 +43,9 @@ pub struct HandedSession {
     pub is_command: bool,
     pub claude_id: Option<String>,
     pub transcript: Option<PathBuf>,
+    /// Аккаунт Claude (`accounts`); у сессий прежних версий — основной.
+    #[serde(default)]
+    pub account: String,
     pub state: String,
     pub detail: String,
     pub since_secs: u64,

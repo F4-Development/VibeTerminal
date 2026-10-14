@@ -437,6 +437,7 @@ pub fn dialog_labels(overlay: &Overlay) -> [&'static str; 2] {
     match overlay {
         Overlay::Rename(_) => [" Сохранить ", " Отмена "],
         Overlay::Confirm(Confirm::Quit) => [" Да, выйти ", " Отмена "],
+        Overlay::Confirm(Confirm::RemoveAccount(_)) => [" Да, убрать ", " Отмена "],
         _ => [" Да, закрыть ", " Отмена "],
     }
 }
@@ -565,6 +566,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::Confirm(confirm) => {
             let (title, text) = match confirm {
                 Confirm::Close => (" Закрыть сессию? ", format!("Claude в «{}» остановится.", app.current().map_or("", |s| s.name.as_str()))),
+                Confirm::RemoveAccount(dir) => (
+                    " Убрать аккаунт? ",
+                    format!(
+                        "{} пропадёт из VibeTerminal, вход забудется. Диалоги останутся.",
+                        app.accounts.get(dir).map(|a| a.label()).unwrap_or_default()
+                    ),
+                ),
                 Confirm::Quit => (
                     " Выйти из VibeTerminal? ",
                     match app.sessions.len() {
@@ -1054,7 +1062,7 @@ pub fn usage_rows(app: &App) -> Vec<UsageRow> {
         percent: context.map(|p| p.round().clamp(0.0, 100.0) as u8),
         detail,
     }];
-    rows.extend(app.usage.iter().map(|limit| UsageRow {
+    rows.extend(app.usage().limits.iter().map(|limit| UsageRow {
         key: limit.key.clone(),
         label: limit.label.clone(),
         short: limit.short.clone(),
@@ -1086,15 +1094,21 @@ fn percent_style(percent: u8) -> Style {
 /// выбрано или ещё не узнали — просто «Лимиты», чтобы было куда нажать.
 pub fn usage_badge(app: &App) -> Option<(Line<'static>, Rect)> {
     let mut spans = vec![Span::raw(" ")];
+    // Аккаунтов несколько — видно, на каком работаем.
+    if app.accounts.list.len() > 1 {
+        spans.push(Span::styled(app.accounts.current().short(), accent()));
+        spans.push(Span::styled(" · ", dim()));
+    }
+    let start = spans.len();
     for row in usage_rows(app).into_iter().filter(|row| app.usage_shown.contains(&row.key)) {
         let Some(percent) = row.percent else { continue };
-        if spans.len() > 1 {
+        if spans.len() > start {
             spans.push(Span::styled(" · ", dim()));
         }
         spans.push(Span::styled(format!("{} ", row.short), dim()));
         spans.push(Span::styled(format!("{percent}%"), percent_style(percent)));
     }
-    if spans.len() == 1 {
+    if spans.len() == start {
         spans.push(Span::styled("Лимиты", dim()));
     }
     spans.push(Span::raw(" "));
@@ -1107,18 +1121,27 @@ pub fn usage_badge(app: &App) -> Option<(Line<'static>, Rect)> {
     Some((line, Rect::new(area.right() - w - 2, area.bottom() - 1, w, 1)))
 }
 
-fn usage_rect(app: &App) -> Rect {
-    let rows = usage_rows(app).len() as u16;
-    centered(app.areas.full, USAGE_WIDTH, 2 + 1 + rows * USAGE_BLOCK + 1)
+/// Строк аккаунтов в окне лимитов: аккаунты и «Добавить аккаунт».
+pub fn account_rows(app: &App) -> usize {
+    app.accounts.list.len() + 1
 }
 
-/// Где каждая строка окна лимитов (название, полоска, сброс) — для кликов.
+fn usage_rect(app: &App) -> Rect {
+    let rows = usage_rows(app).len() as u16;
+    let accounts = account_rows(app) as u16;
+    centered(app.areas.full, USAGE_WIDTH, 2 + 1 + accounts + 1 + rows * USAGE_BLOCK + 1)
+}
+
+/// Где каждая строка окна лимитов — для кликов: сначала аккаунты по строке,
+/// потом лимиты (название, полоска, сброс).
 pub fn usage_row_rects(app: &App) -> Vec<Rect> {
     let inner = frame_block("", true).inner(usage_rect(app));
-    (0..usage_rows(app).len() as u16)
-        .map(|i| Rect::new(inner.x, inner.y + 1 + i * USAGE_BLOCK, inner.width, USAGE_BLOCK - 1))
-        .filter(|r| r.bottom() <= inner.bottom())
-        .collect()
+    let accounts = account_rows(app) as u16;
+    let account_rects = (0..accounts).map(|i| Rect::new(inner.x, inner.y + 1 + i, inner.width, 1));
+    let top = inner.y + 1 + accounts + 1;
+    let limit_rects = (0..usage_rows(app).len() as u16)
+        .map(|i| Rect::new(inner.x, top + i * USAGE_BLOCK, inner.width, USAGE_BLOCK - 1));
+    account_rects.chain(limit_rects).filter(|r| r.bottom() <= inner.bottom()).collect()
 }
 
 fn usage_footer(app: &App) -> Rect {
@@ -1139,11 +1162,22 @@ pub fn usage_contains(app: &App, column: u16, row: u16) -> bool {
 fn draw_usage(frame: &mut Frame, app: &App, cursor: usize) {
     let area = usage_rect(app);
     frame.render_widget(Clear, area);
-    let hint = " ↑↓ · Пробел — показывать внизу · R — обновить · Esc ";
-    let block = frame_block(" Лимиты Claude ", true).title_bottom(Line::from(hint).centered());
+    let accounts = app.accounts.list.len();
+    let hint = match app.accounts.list.get(cursor) {
+        Some(account) if account.dir.is_empty() => " Enter — работать с этого · R — обновить · Esc ",
+        Some(_) => " Enter — работать с этого · ⌫ — убрать · Esc ",
+        None if cursor == accounts => " Enter — войти в ещё один аккаунт · Esc ",
+        None => " ↑↓ · Пробел — показывать внизу · R — обновить · Esc ",
+    };
+    let block = frame_block(" Аккаунты и лимиты Claude ", true).title_bottom(Line::from(hint).centered());
     frame.render_widget(block, area);
+    let rects = usage_row_rects(app);
+    for (i, rect) in rects.iter().take(accounts + 1).enumerate() {
+        frame.render_widget(Paragraph::new(account_line(app, i, i == cursor, rect.width)), *rect);
+    }
     let rows = usage_rows(app);
-    for (i, (rect, row)) in usage_row_rects(app).into_iter().zip(&rows).enumerate() {
+    for (i, (&rect, row)) in rects.iter().skip(accounts + 1).zip(&rows).enumerate() {
+        let i = i + accounts + 1;
         let shown = app.usage_shown.contains(&row.key);
         let label_style = if i == cursor { primary() } else { bold() };
         let title = Line::from(vec![
@@ -1166,7 +1200,8 @@ fn draw_usage(frame: &mut Frame, app: &App, cursor: usize) {
         let detail = Line::from(Span::styled(format!("      {}", row.detail), dim()));
         frame.render_widget(Paragraph::new(detail), Rect::new(rect.x, rect.y + 2, rect.width, 1));
     }
-    let status = match (&app.usage_error, app.usage_loading, app.usage_at) {
+    let usage = app.usage();
+    let status = match (&usage.error, usage.loading, usage.at) {
         (_, true, _) => Span::styled("  Узнаю у Claude…", dim()),
         (Some(error), ..) => Span::styled(format!("  Не обновилось: {error}"), Style::new().fg(Color::Red)),
         (None, _, Some(at)) => Span::styled(format!("  Обновлено {}", ago(at)), dim()),
@@ -1177,6 +1212,46 @@ fn draw_usage(frame: &mut Frame, app: &App, cursor: usize) {
     frame.render_widget(Paragraph::new(status), Rect::new(footer.x, footer.y, refresh.x.saturating_sub(footer.x + 1), 1));
     let style = if hovered(app, Target::UsageRefresh) { primary() } else { accent() };
     frame.render_widget(Paragraph::new(Span::styled(USAGE_REFRESH, style)), refresh);
+}
+
+/// Строка аккаунта: «● me@mail.ru · Max      5 ч 92% · неделя 40%». За
+/// последним аккаунтом — «+ Добавить аккаунт».
+fn account_line(app: &App, index: usize, selected: bool, room: u16) -> Line<'static> {
+    let label_style = if selected { primary() } else { bold() };
+    let Some(account) = app.accounts.list.get(index) else {
+        return Line::from(vec![Span::styled("  + ", accent()), Span::styled("Добавить аккаунт", label_style)]);
+    };
+    let current = account.dir == app.accounts.current;
+    let mut left = vec![
+        Span::styled(if current { "  ● " } else { "  ○ " }, if current { accent() } else { dim() }),
+        Span::styled(account.label(), label_style),
+    ];
+    if !account.plan.is_empty() {
+        left.push(Span::styled(format!(" · {}", account.plan), dim()));
+    }
+    let usage = app.usage.get(&account.dir);
+    let mut right: Vec<Span<'static>> = Vec::new();
+    for limit in usage.map(|u| u.limits.as_slice()).unwrap_or_default().iter().filter(|l| l.key == "session" || l.key == "week") {
+        if !right.is_empty() {
+            right.push(Span::styled(" · ", dim()));
+        }
+        right.push(Span::styled(format!("{} ", limit.short), dim()));
+        right.push(Span::styled(format!("{}%", limit.percent), percent_style(limit.percent)));
+    }
+    if right.is_empty() {
+        let text = match usage {
+            _ if !account.dir.is_empty() && account.email.is_empty() => "Enter — войти",
+            Some(u) if u.loading => "узнаю…",
+            Some(u) if u.error.is_some() => "лимиты не узнать",
+            _ => "",
+        };
+        right.push(Span::styled(text, dim()));
+    }
+    right.push(Span::raw(" "));
+    let used = left.iter().chain(&right).map(|s| width(&s.content)).sum::<u16>();
+    left.push(Span::raw(" ".repeat(room.saturating_sub(used) as usize)));
+    left.extend(right);
+    Line::from(left)
 }
 
 /// «только что», «3 мин назад».

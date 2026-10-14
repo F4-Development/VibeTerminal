@@ -78,6 +78,8 @@ pub struct Launch {
     /// Сокет окна vv, куда стучатся хуки.
     pub socket: PathBuf,
     pub vv_exe: PathBuf,
+    /// Папка Claude аккаунта, на котором работаем (`accounts`); пусто — основной.
+    pub account: String,
 }
 
 pub struct Session {
@@ -106,6 +108,8 @@ pub struct Session {
     pub ci_expect: Option<(String, Instant)>,
     /// Сессия-команда (вход, установка), а не Claude.
     pub is_command: bool,
+    /// Аккаунт, с которым запущен Claude, — папка, как в `Launch::account`.
+    pub account: String,
     /// Работает, готово, прервали — по событиям Claude.
     pub status: Status,
     /// Заполнение контекста и лимиты из строки состояния Claude.
@@ -196,6 +200,9 @@ impl Session {
         for var in PARENT_CLAUDE_VARS {
             cmd.env_remove(var);
         }
+        if !launch.account.is_empty() {
+            cmd.env("CLAUDE_CONFIG_DIR", &launch.account);
+        }
 
         let child = pty
             .slave
@@ -209,7 +216,9 @@ impl Session {
         let writer = pty.master.take_writer()?;
         read_output(reader, on_output);
         let is_command = matches!(program, Program::Command(_));
-        Ok(Self::assemble(id, name, cwd, (rows, cols), pty.master, writer, child, pid, is_command))
+        let mut session = Self::assemble(id, name, cwd, (rows, cols), pty.master, writer, child, pid, is_command);
+        session.account.clone_from(&launch.account);
+        Ok(session)
     }
 
     /// Новая версия vv после перезагрузки принимает сессию старой: терминал
@@ -249,6 +258,7 @@ impl Session {
         session.status = Status::restored(State::from_name(&handed.state), handed.detail.clone(), handed.since_secs);
         session.claude_id.clone_from(&handed.claude_id);
         session.transcript.clone_from(&handed.transcript);
+        session.account.clone_from(&handed.account);
         Ok(session)
     }
 
@@ -284,6 +294,7 @@ impl Session {
             is_command: self.is_command,
             claude_id: self.claude_id.clone(),
             transcript: self.transcript.clone(),
+            account: self.account.clone(),
             state: self.status.state.name().to_string(),
             detail: self.status.detail.clone(),
             since_secs: self.status.since.elapsed().as_secs(),
@@ -327,6 +338,7 @@ impl Session {
             ci_due: None,
             ci_expect: None,
             is_command,
+            account: String::new(),
             status: Status::default(),
             status_line: None,
             claude_id: None,
@@ -378,7 +390,7 @@ impl Session {
             return false;
         }
         self.claude_id = Some(id.to_string());
-        self.transcript = (!transcript.is_empty()).then(|| PathBuf::from(transcript));
+        self.transcript = (!transcript.is_empty()).then(|| real_path(Path::new(transcript)));
         true
     }
 
@@ -565,13 +577,18 @@ impl Session {
 /// Останавливает Claude так же, как закрытие окна терминала: SIGHUP, а кто
 /// не вышел за `STOP_GRACE` — SIGKILL. Возвращается, когда все мертвы.
 pub fn stop_all(sessions: &mut [Session]) {
-    for session in sessions.iter_mut() {
+    stop(sessions.iter_mut().collect());
+}
+
+/// То же для части сессий.
+pub fn stop(mut sessions: Vec<&mut Session>) {
+    for session in &mut sessions {
         if !session.try_reap() {
             session.signal(libc::SIGHUP);
         }
     }
     let deadline = Instant::now() + STOP_GRACE;
-    while Instant::now() < deadline && !sessions.iter_mut().all(Session::try_reap) {
+    while Instant::now() < deadline && !sessions.iter_mut().all(|s| s.try_reap()) {
         thread::sleep(Duration::from_millis(20));
     }
     for session in sessions.iter_mut().filter(|s| s.exit_code.is_none()) {
@@ -579,6 +596,19 @@ pub fn stop_all(sessions: &mut [Session]) {
         let code = session.child.wait().map(|s| s.exit_code()).unwrap_or(1);
         session.set_exited(code);
     }
+}
+
+/// Путь без ссылок. Диалог аккаунта Claude лежит в его папке по ссылке на
+/// общий `~/.claude/projects` — помним настоящий путь, чтобы диалог нашёлся
+/// и после того, как аккаунт убрали. Самого файла может ещё не быть.
+fn real_path(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|dir| {
+            let real = dir.canonicalize().ok()?;
+            let rest = path.strip_prefix(dir).ok()?;
+            Some(if rest.as_os_str().is_empty() { real } else { real.join(rest) })
+        })
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Для аварийного выхода, когда до сессий уже не добраться.
@@ -818,5 +848,24 @@ mod tests {
         let mut p = parser();
         p.process(b"\x1b]0;my task\x07");
         assert_eq!(p.callbacks().title, "my task");
+    }
+
+    #[test]
+    fn transcript_path_through_link_is_resolved() {
+        // Временная папка macOS сама за ссылкой (`/var` → `/private/var`).
+        let root = std::env::temp_dir().join(format!("vv-real-path-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let shared = root.join("claude/projects/p");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("a.jsonl"), "").unwrap();
+        let account = root.join("account");
+        std::fs::create_dir_all(&account).unwrap();
+        std::os::unix::fs::symlink(root.join("claude/projects"), account.join("projects")).unwrap();
+
+        assert_eq!(real_path(&account.join("projects/p/a.jsonl")), shared.join("a.jsonl"));
+        // Файла ещё нет — настоящая папка и то же имя.
+        assert_eq!(real_path(&account.join("projects/p/b.jsonl")), shared.join("b.jsonl"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

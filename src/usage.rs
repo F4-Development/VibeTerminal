@@ -44,8 +44,9 @@ pub fn set_live(limits: &mut Vec<Limit>, key: &str, percent: f64) -> bool {
     true
 }
 
-/// Спросить у `claude`. Долго (несколько секунд) — звать из фонового потока.
-pub fn fetch() -> Result<Vec<Limit>, String> {
+/// Спросить у `claude` аккаунта с этой папкой (`None` — основного). Долго
+/// (несколько секунд) — звать из фонового потока.
+pub fn fetch(account: Option<&std::path::Path>) -> Result<Vec<Limit>, String> {
     let dir = std::env::temp_dir().join("vibeterminal-usage");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut command = Command::new("claude");
@@ -57,6 +58,9 @@ pub fn fetch() -> Result<Vec<Limit>, String> {
         .stderr(Stdio::piped());
     for var in PARENT_CLAUDE_VARS {
         command.env_remove(var);
+    }
+    if let Some(dir) = account {
+        command.env("CLAUDE_CONFIG_DIR", dir);
     }
     // SAFETY: setsid безопасен между fork и exec.
     unsafe {

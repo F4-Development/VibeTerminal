@@ -26,6 +26,7 @@ use ratatui::layout::Rect;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
 
+use crate::accounts::{self, Accounts};
 use crate::menu::{self, Action};
 use crate::picker::{self, Picker};
 use crate::reload;
@@ -115,8 +116,8 @@ pub enum Event {
     Hook(SessionId, HookEvent),
     /// Кликнули по уведомлению этой сессии.
     OpenSession(SessionId),
-    /// Узнали лимиты Claude.
-    Usage(Result<Vec<Limit>, String>),
+    /// Узнали лимиты аккаунта Claude (по папке) и кто в него вошёл.
+    Usage(String, Result<Vec<Limit>, String>, Option<accounts::Status>),
     /// Claude обновил строку состояния: контекст и лимиты.
     StatusLine(SessionId, StatusLine),
     /// Голос распознан (или нет).
@@ -163,7 +164,22 @@ pub enum VoiceState {
 pub enum Confirm {
     Close,
     Quit,
+    /// Убрать аккаунт Claude с этой папкой.
+    RemoveAccount(String),
 }
+
+/// Лимиты одного аккаунта Claude.
+#[derive(Default)]
+pub struct Usage {
+    /// Последние, что удалось узнать.
+    pub limits: Vec<Limit>,
+    /// Почему не удалось узнать в последний раз.
+    pub error: Option<String>,
+    pub at: Option<Instant>,
+    pub loading: bool,
+}
+
+static NO_USAGE: Usage = Usage { limits: Vec::new(), error: None, at: None, loading: false };
 
 pub struct App {
     pub sessions: Vec<Session>,
@@ -194,12 +210,10 @@ pub struct App {
     focused: bool,
     last_git_tick: Instant,
     notifier: Notifier,
-    /// Лимиты Claude: последние, что удалось узнать.
-    pub usage: Vec<Limit>,
-    /// Почему не удалось узнать в последний раз.
-    pub usage_error: Option<String>,
-    pub usage_at: Option<Instant>,
-    pub usage_loading: bool,
+    /// Аккаунты Claude и какой сейчас.
+    pub accounts: Accounts,
+    /// Лимиты по аккаунтам (ключ — папка, как в `Account::dir`).
+    pub usage: BTreeMap<String, Usage>,
     /// Какие лимиты показывать внизу (из настроек).
     pub usage_shown: Vec<String>,
     pub voice: VoiceState,
@@ -223,7 +237,13 @@ pub fn run() -> Result<()> {
     POINTER_SHAPES.store(caps.pointer_shape, Ordering::Relaxed);
     // Сокет живёт, пока живёт окно, и убирается при выходе.
     let hooks = HookServer::start(&home.join(".vibeterminal/run"), tx.clone())?;
+    let accounts = Accounts::load(&home);
+    // Папку аккаунта могли стереть, а в `~/.claude` — появиться новое общее.
+    if let Some(dir) = accounts.current().config_dir() {
+        let _ = accounts::prepare(&home, dir);
+    }
     let launch = Launch {
+        account: accounts.current.clone(),
         truecolor: caps.truecolor,
         hyperlinks: caps.hyperlinks,
         socket: hooks.path.clone(),
@@ -256,10 +276,8 @@ pub fn run() -> Result<()> {
         window_title: String::new(),
         focused: true,
         last_git_tick: Instant::now(),
-        usage: Vec::new(),
-        usage_error: None,
-        usage_at: None,
-        usage_loading: false,
+        accounts,
+        usage: BTreeMap::new(),
         usage_shown,
         voice: VoiceState::Idle,
         voice_used: None,
@@ -318,6 +336,11 @@ impl App {
         self.flash = Some((text.into(), Instant::now()));
     }
 
+    /// Лимиты аккаунта, на котором работаем.
+    pub fn usage(&self) -> &Usage {
+        self.usage.get(&self.accounts.current).unwrap_or(&NO_USAGE)
+    }
+
     fn run_loop(&mut self, terminal: &mut Screen, rx: &Receiver<Event>) -> Result<()> {
         let mut dirty = true;
         while !self.quit {
@@ -331,6 +354,7 @@ impl App {
                 self.last_git_tick = Instant::now();
                 self.refresh_git(self.selected);
                 self.refresh_ci_if_due(self.selected);
+                dirty |= self.sync_accounts();
             }
             self.refresh_ci_view();
             self.refresh_usage(USAGE_EVERY);
@@ -480,6 +504,7 @@ impl App {
                 if event.name == "Stop" {
                     self.refresh_usage(USAGE_AFTER_TURN);
                 }
+                let limit_hit = event.name == "StopFailure" && event.error == "rate_limit";
                 if self.sessions[index].note_dialog(&event.claude_id, &event.transcript) {
                     self.save_state();
                 }
@@ -498,7 +523,13 @@ impl App {
                     }
                 }
                 self.mark_seen();
-                Ok(resolved || changed)
+                // Упёрлась в лимит того аккаунта, с которым работаем, — есть куда уйти.
+                if limit_hit && self.accounts.list.len() > 1 && self.sessions[index].account == self.launch.account {
+                    self.set_flash("Лимит кончился — переключи аккаунт в окне лимитов");
+                }
+                // Ход закончился — сессия, что ждала, переходит на новый аккаунт.
+                let moved = matches!(event.name.as_str(), "Stop" | "StopFailure") && self.move_to_account();
+                Ok(resolved || changed || moved)
             }
             Event::StatusLine(id, line) => {
                 let Some(index) = self.index_of(id) else { return Ok(false) };
@@ -508,12 +539,14 @@ impl App {
                 let (five_hour, seven_day) = (line.five_hour, line.seven_day);
                 let changed = self.sessions[index].status_line.as_ref() != Some(&line);
                 self.sessions[index].status_line = Some(line);
+                // Лимиты того аккаунта, на котором работает эта сессия.
+                let usage = &mut self.usage.entry(self.sessions[index].account.clone()).or_default().limits;
                 let mut limits = false;
                 if let Some(percent) = five_hour {
-                    limits |= usage::set_live(&mut self.usage, "session", percent);
+                    limits |= usage::set_live(usage, "session", percent);
                 }
                 if let Some(percent) = seven_day {
-                    limits |= usage::set_live(&mut self.usage, "week", percent);
+                    limits |= usage::set_live(usage, "week", percent);
                 }
                 Ok(limits || (changed && index == self.selected))
             }
@@ -577,16 +610,22 @@ impl App {
                 }
                 Ok(true)
             }
-            Event::Usage(result) => {
-                self.usage_loading = false;
-                self.usage_at = Some(Instant::now());
+            Event::Usage(account, result, status) => {
+                if let Some(status) = status
+                    && self.accounts.note_status(&account, &status)
+                {
+                    let _ = self.accounts.save(&self.home);
+                }
+                let usage = self.usage.entry(account).or_default();
+                usage.loading = false;
+                usage.at = Some(Instant::now());
                 match result {
                     Ok(limits) => {
-                        self.usage = limits;
-                        self.usage_error = None;
+                        usage.limits = limits;
+                        usage.error = None;
                     }
                     // Прошлые цифры не выкидываем — показываем, почему не обновились.
-                    Err(text) => self.usage_error = Some(text),
+                    Err(text) => usage.error = Some(text),
                 }
                 Ok(true)
             }
@@ -876,7 +915,7 @@ impl App {
 
     fn on_overlay_key(&mut self, key: KeyEvent) -> Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let usage_rows = ui::usage_rows(self).len().max(1);
+        let usage_rows = ui::usage_rows(self).len() + ui::account_rows(self);
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Help => self.overlay = Overlay::None,
@@ -889,9 +928,15 @@ impl App {
                     KeyCode::Down | KeyCode::Tab => *cursor = (*cursor + 1) % len,
                     KeyCode::Char(' ') | KeyCode::Enter => {
                         let index = *cursor;
-                        self.toggle_usage(index);
+                        self.pick_usage_row(index);
                     }
-                    KeyCode::Char('r' | 'R') => self.refresh_usage(Duration::ZERO),
+                    KeyCode::Backspace | KeyCode::Delete => {
+                        let index = *cursor;
+                        if let Some(account) = self.accounts.list.get(index).filter(|a| !a.dir.is_empty()) {
+                            self.overlay = Overlay::Confirm(Confirm::RemoveAccount(account.dir.clone()));
+                        }
+                    }
+                    KeyCode::Char('r' | 'R') => self.refresh_all_usage(Duration::ZERO),
                     _ => return Ok(false),
                 }
             }
@@ -980,7 +1025,7 @@ impl App {
             Action::Help => self.overlay = Overlay::Help,
             Action::Usage => {
                 self.overlay = Overlay::Usage(0);
-                self.refresh_usage(USAGE_ON_OPEN);
+                self.refresh_all_usage(USAGE_ON_OPEN);
             }
             Action::Voice => match self.voice {
                 VoiceState::Recording { .. } => self.finish_voice(),
@@ -1039,6 +1084,7 @@ impl App {
             }
             Overlay::Confirm(Confirm::Close) => self.close_current(),
             Overlay::Confirm(Confirm::Quit) => self.quit = true,
+            Overlay::Confirm(Confirm::RemoveAccount(dir)) => self.remove_account(&dir),
             other => self.overlay = other,
         }
     }
@@ -1304,9 +1350,9 @@ impl App {
             }
             Target::UsageRow(index) => {
                 self.overlay = Overlay::Usage(index);
-                self.toggle_usage(index);
+                self.pick_usage_row(index);
             }
-            Target::UsageRefresh => self.refresh_usage(Duration::ZERO),
+            Target::UsageRefresh => self.refresh_all_usage(Duration::ZERO),
             Target::Git(t) => {
                 if let Overlay::Git(git) = &mut self.overlay {
                     let command = gitui::click(git, t);
@@ -1562,11 +1608,13 @@ impl App {
             (false, 0) => format!("«{}»: Claude закрылся", session.name),
             (false, code) => format!("«{}»: Claude завершился с кодом {code}", session.name),
         };
-        // Вход или установка закончились — CI всех сессий узнаём заново.
+        // Вход или установка закончились — CI всех сессий узнаём заново,
+        // а кто вошёл в аккаунты Claude — тоже.
         if session.is_command {
             for other in &mut self.sessions {
                 other.ci_due = None;
             }
+            self.refresh_all_usage(Duration::ZERO);
         }
         self.set_flash(note);
         if index < self.selected {
@@ -1820,16 +1868,203 @@ impl App {
         });
     }
 
-    /// Узнать лимиты Claude в фоне, если последние старше `older_than`.
+    /// Узнать лимиты текущего аккаунта в фоне, если последние старше `older_than`.
     fn refresh_usage(&mut self, older_than: Duration) {
-        if self.usage_loading || self.usage_at.is_some_and(|at| at.elapsed() < older_than) {
+        self.refresh_account_usage(self.accounts.current.clone(), older_than);
+    }
+
+    /// То же для всех аккаунтов — в окне лимитов видно, где ещё есть запас.
+    fn refresh_all_usage(&mut self, older_than: Duration) {
+        let dirs: Vec<String> = self.accounts.list.iter().map(|a| a.dir.clone()).collect();
+        for dir in dirs {
+            self.refresh_account_usage(dir, older_than);
+        }
+    }
+
+    fn refresh_account_usage(&mut self, dir: String, older_than: Duration) {
+        let usage = self.usage.entry(dir.clone()).or_default();
+        if usage.loading || usage.at.is_some_and(|at| at.elapsed() < older_than) {
             return;
         }
-        self.usage_loading = true;
+        usage.loading = true;
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let _ = tx.send(Event::Usage(usage::fetch()));
+            let config = (!dir.is_empty()).then(|| PathBuf::from(&dir));
+            let status = accounts::status(config.as_deref());
+            // В дополнительный не вошли — спрашивать лимиты не у кого. Основной
+            // спрашиваем всегда: там может быть и ключ API, у него свой ответ.
+            let limits = match &status {
+                Some(status) if config.is_some() && status.email.is_empty() => Err("не выполнен вход".to_string()),
+                _ => usage::fetch(config.as_deref()),
+            };
+            let _ = tx.send(Event::Usage(dir, limits, status));
         });
+    }
+
+    /// Enter или клик в окне лимитов: аккаунт — работать с него, «Добавить» —
+    /// вход в новый, лимит — галочка.
+    fn pick_usage_row(&mut self, index: usize) {
+        let accounts = self.accounts.list.len();
+        match index {
+            i if i < accounts => {
+                let account = self.accounts.list[i].clone();
+                if !account.dir.is_empty() && account.email.is_empty() {
+                    self.login(&account.dir);
+                } else {
+                    self.switch_account(&account.dir);
+                }
+            }
+            i if i == accounts => self.add_account(),
+            i => self.toggle_usage(i - accounts - 1),
+        }
+    }
+
+    /// Работать с этого аккаунта: новые сессии — на нём, открытые
+    /// продолжают свои диалоги на нём же — те, что свободны, сразу, занятые —
+    /// когда закончат ход.
+    fn switch_account(&mut self, dir: &str) {
+        if self.accounts.current == dir {
+            return;
+        }
+        if let Some(config) = self.accounts.get(dir).and_then(|a| a.config_dir())
+            && let Err(err) = accounts::prepare(&self.home, config)
+        {
+            self.set_flash(format!("Аккаунт не готов: {err}"));
+            return;
+        }
+        self.accounts.current = dir.to_string();
+        if let Err(err) = self.accounts.save(&self.home) {
+            self.set_flash(format!("не сохранилось: {err}"));
+        }
+        self.launch.account = dir.to_string();
+        self.move_to_account();
+        let waiting = self.sessions.iter().filter(|s| !s.is_command && s.account != dir).count();
+        let name = self.accounts.current().label();
+        self.set_flash(match waiting {
+            0 => format!("Работаю с {name}"),
+            n => format!("Работаю с {name}; занятых сессий: {n} — перейдут, когда закончат"),
+        });
+        self.refresh_usage(USAGE_ON_OPEN);
+    }
+
+    /// Перезапустить на текущем аккаунте сессии, запущенные на другом: тот
+    /// же диалог через `--resume`. Работающие и ждущие ответа не трогаем —
+    /// дойдёт очередь, когда закончат ход. `true` — кого-то перезапустили.
+    fn move_to_account(&mut self) -> bool {
+        let account = self.launch.account.clone();
+        let due: Vec<usize> = (0..self.sessions.len())
+            .filter(|&i| {
+                let s = &self.sessions[i];
+                !s.is_command
+                    && s.account != account
+                    && s.status.state != State::Working
+                    && s.permissions.is_empty()
+                    && s.git_busy.is_none()
+            })
+            .collect();
+        if due.is_empty() {
+            return false;
+        }
+        // Сначала старый Claude дописывает диалог и выходит, потом новый его читает.
+        session::stop(self.sessions.iter_mut().enumerate().filter(|(i, _)| due.contains(i)).map(|(_, s)| s).collect());
+        let base = Settings::load(&self.home).claude_args();
+        let area = self.areas.agent;
+        let size = (area.height.max(1), area.width.max(1));
+        for &index in &due {
+            let old = &self.sessions[index];
+            let mut args = base.clone();
+            let dialog = SavedSession { claude_id: old.claude_id.clone(), transcript: old.transcript.clone(), ..SavedSession::default() };
+            if let Some(id) = dialog.resumable() {
+                args.extend(["--resume".to_string(), id.to_string()]);
+            }
+            // Новый номер: события старого Claude (его выход) новую сессию не заденут.
+            let id = self.next_id;
+            self.next_id += 1;
+            let tx = self.tx.clone();
+            let spawned = Session::spawn(id, old.name.clone(), &old.cwd, size, &self.launch, &Program::Claude(args), move |chunk| {
+                let _ = tx.send(chunk.map_or(Event::Exited(id), |bytes| Event::Output(id, bytes)));
+            });
+            let mut fresh = match spawned {
+                Ok(fresh) => fresh,
+                Err(err) => {
+                    self.set_flash(format!("«{}» не перезапустилась: {err:#}", old.name));
+                    continue;
+                }
+            };
+            let old = &mut self.sessions[index];
+            fresh.claude_id = old.claude_id.take();
+            fresh.transcript = old.transcript.take();
+            fresh.git = old.git.take();
+            fresh.last_fetch = old.last_fetch;
+            fresh.ci = old.ci.take();
+            fresh.ci_due = old.ci_due;
+            fresh.ci_expect = old.ci_expect.take();
+            *old = fresh;
+        }
+        self.save_state();
+        true
+    }
+
+    /// Новый аккаунт: папка и сессия входа слева. Когда вход закончится,
+    /// аккаунт появится в окне лимитов с почтой.
+    fn add_account(&mut self) {
+        match self.accounts.add(&self.home) {
+            Ok(dir) => {
+                if let Err(err) = self.accounts.save(&self.home) {
+                    self.set_flash(format!("не сохранилось: {err}"));
+                }
+                self.login(&dir);
+            }
+            Err(err) => self.set_flash(format!("Аккаунт не создался: {err}")),
+        }
+    }
+
+    fn login(&mut self, dir: &str) {
+        self.overlay = Overlay::None;
+        let home = self.home.clone();
+        if let Err(err) = self.spawn_session("вход Claude".into(), &home, Program::Command(accounts::login_command(dir))) {
+            self.set_flash(format!("не открылось: {err:#}"));
+        }
+    }
+
+    /// Убрать аккаунт: выйти из него и стереть его папку. Работали с него —
+    /// сначала переходим на основной; пока на нём кто-то занят, не убираем.
+    fn remove_account(&mut self, dir: &str) {
+        self.overlay = Overlay::Usage(0);
+        if self.accounts.current == dir {
+            self.accounts.current.clear();
+            self.launch.account.clear();
+            self.move_to_account();
+        }
+        if self.sessions.iter().any(|s| s.account == dir) {
+            let _ = self.accounts.save(&self.home);
+            self.set_flash("На этом аккаунте сессии ещё работают — убери его, когда закончат");
+            return;
+        }
+        let name = self.accounts.get(dir).map(accounts::Account::label).unwrap_or_default();
+        self.accounts.remove(dir);
+        if let Err(err) = self.accounts.save(&self.home) {
+            self.set_flash(format!("не сохранилось: {err}"));
+            return;
+        }
+        self.usage.remove(dir);
+        let dir = PathBuf::from(dir);
+        thread::spawn(move || accounts::forget(&dir));
+        self.set_flash(format!("Аккаунт {name} убран"));
+    }
+
+    /// Аккаунт переключили в другом окне VibeTerminal — и здесь туда же.
+    fn sync_accounts(&mut self) -> bool {
+        let fresh = Accounts::load(&self.home);
+        if fresh == self.accounts {
+            return false;
+        }
+        self.accounts = fresh;
+        if self.launch.account != self.accounts.current {
+            self.launch.account = self.accounts.current.clone();
+            self.move_to_account();
+        }
+        true
     }
 
     /// Галочка у лимита: показывать его внизу или нет. Запоминается в настройках.
