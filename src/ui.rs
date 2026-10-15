@@ -337,6 +337,40 @@ pub fn tree_order(keys: &[(&Path, bool)]) -> Vec<usize> {
     order
 }
 
+/// Сдвинуть сессию на шаг вверх или вниз в списке, уже стоящем деревом.
+/// Соседку того же рода в своём проекте (копию — копию) сессия обгоняет
+/// одна, а проект переезжает целиком, с копиями, через соседний проект;
+/// `whole` — сразу проект. Копия из своего проекта не уходит. Возвращает
+/// номера сессий в новом порядке; `None` — двигать некуда.
+pub fn moved(keys: &[(&Path, bool)], index: usize, up: bool, whole: bool) -> Option<Vec<usize>> {
+    let (project, copy) = *keys.get(index)?;
+    let len = keys.len();
+    let mut order: Vec<usize> = (0..len).collect();
+    let neighbour = if up { index.checked_sub(1) } else { Some(index + 1).filter(|&j| j < len) };
+    if !whole && let Some(j) = neighbour.filter(|&j| keys[j] == (project, copy)) {
+        order.swap(index, j);
+        return Some(order);
+    }
+    if copy && !whole {
+        return None;
+    }
+    // Проекты стоят подряд: от первой сессии проекта до первой чужой.
+    let run = |from: usize| from + keys[from..].iter().take_while(|(p, _)| *p == keys[from].0).count();
+    let start = keys.iter().position(|(p, _)| *p == project)?;
+    let (first, second) = if up {
+        let before = keys[..start].last()?.0;
+        let from = keys[..start].iter().rposition(|(p, _)| *p != before).map_or(0, |i| i + 1);
+        (from..start, start..run(start))
+    } else {
+        let end = run(start);
+        if end == len {
+            return None;
+        }
+        (start..end, end..run(end))
+    };
+    Some((0..first.start).chain(second.clone()).chain(first).chain(second.end..len).collect())
+}
+
 /// Строки списка по сессиям, уже стоящим деревом.
 pub fn slots(keys: &[(&Path, bool)]) -> Vec<Slot> {
     let mut out = Vec::new();
@@ -1464,6 +1498,7 @@ fn draw_help(frame: &mut Frame, full: Rect) {
         Line::raw(""),
         Line::from(vec![Span::styled("Мышь    ", bold), Span::raw(" — клик по сессии слева открывает её,")]),
         Line::raw("          правый клик — меню сессии (копия, имя, папка…)."),
+        Line::raw("          Сессии в списке перетаскиваются мышью."),
         Line::raw("          Кнопки кликаются, колесо листает историю."),
         Line::raw(""),
         Line::from(vec![Span::styled("Разрешения", bold), Span::raw(" — когда Claude спрашивает, можно ли")]),
@@ -1517,5 +1552,38 @@ mod tests {
         // Проект открыли позже — он встаёт над своей копией.
         let keys = [(shop, true), (landing, false), (shop, false)];
         assert_eq!(tree_order(&keys), [2, 0, 1]);
+    }
+
+    #[test]
+    fn projects_move_with_their_copies() {
+        let (shop, landing, api) = (Path::new("/p/shop"), Path::new("/p/landing"), Path::new("/p/api"));
+        let keys = [(shop, false), (shop, true), (shop, true), (landing, false), (api, false)];
+        // Проект вниз — с копиями, через landing.
+        assert_eq!(moved(&keys, 0, false, false).unwrap(), [3, 0, 1, 2, 4]);
+        // landing вверх — через весь shop.
+        assert_eq!(moved(&keys, 3, true, false).unwrap(), [3, 0, 1, 2, 4]);
+        // Копии меняются местами между собой, но из проекта не уходят.
+        assert_eq!(moved(&keys, 1, false, false).unwrap(), [0, 2, 1, 3, 4]);
+        assert_eq!(moved(&keys, 1, true, false), None);
+        assert_eq!(moved(&keys, 2, false, false), None);
+        // Копия за проект — весь проект.
+        assert_eq!(moved(&keys, 2, false, true).unwrap(), [3, 0, 1, 2, 4]);
+        // Край списка.
+        assert_eq!(moved(&keys, 0, true, false), None);
+        assert_eq!(moved(&keys, 4, false, false), None);
+        // Порядок, что дали, дерево не переставляет.
+        for (index, up) in [(0, false), (1, false), (3, true), (4, true)] {
+            let order = moved(&keys, index, up, false).unwrap();
+            let after: Vec<_> = order.iter().map(|&i| keys[i]).collect();
+            assert!(tree_order(&after).iter().enumerate().all(|(i, &j)| i == j));
+        }
+    }
+
+    #[test]
+    fn two_claudes_in_one_folder_swap() {
+        let (shop, landing) = (Path::new("/p/shop"), Path::new("/p/landing"));
+        let keys = [(landing, false), (shop, false), (shop, false)];
+        assert_eq!(moved(&keys, 2, true, false).unwrap(), [0, 2, 1]);
+        assert_eq!(moved(&keys, 1, true, false).unwrap(), [1, 2, 0]);
     }
 }

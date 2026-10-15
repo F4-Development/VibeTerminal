@@ -32,6 +32,9 @@ pub enum Act {
     /// Открыть сессию в папке проекта.
     OpenProject,
     Rename,
+    /// Выше или ниже в списке сессий.
+    Up,
+    Down,
     Finder,
     CopyPath,
     Close,
@@ -55,7 +58,8 @@ pub struct SessionMenu {
 }
 
 impl SessionMenu {
-    pub fn for_session(session: &Session, at: (u16, u16)) -> Self {
+    /// `moves` — можно ли сдвинуть выше и ниже.
+    pub fn for_session(session: &Session, moves: [bool; 2], at: (u16, u16)) -> Self {
         // Без запуска git: что знаем о папке — ветка в шапке, копия, `.git`.
         let git = !session.is_command
             && (session.git.is_some() || session.copy_of.is_some() || session.cwd.join(".git").exists());
@@ -71,12 +75,13 @@ impl SessionMenu {
         push("✎", "Переименовать…", Act::Rename);
         push("↗", "Открыть в Finder", Act::Finder);
         push("⎘", "Скопировать путь", Act::CopyPath);
+        push_moves(&mut items, moves);
         items.push(Item { icon: "✕", label: "Закрыть сессию".into(), act: Act::Close, gap: true });
         Self { about: About::Session(session.id), title: format!(" {} ", session.name), items, cursor: 0, at }
     }
 
-    pub fn for_project(project: &Path, at: (u16, u16)) -> Self {
-        let items = [
+    pub fn for_project(project: &Path, moves: [bool; 2], at: (u16, u16)) -> Self {
+        let mut items: Vec<Item> = [
             ("→", "Открыть проект", Act::OpenProject),
             ("+", "Новая рабочая копия…", Act::NewCopy),
             ("↗", "Открыть в Finder", Act::Finder),
@@ -85,6 +90,7 @@ impl SessionMenu {
         .into_iter()
         .map(|(icon, label, act)| Item { icon, label: label.into(), act, gap: false })
         .collect();
+        push_moves(&mut items, moves);
         Self { about: About::Project(project.to_path_buf()), title: format!(" {} ", folder_name(project)), items, cursor: 0, at }
     }
 
@@ -124,6 +130,14 @@ impl SessionMenu {
     /// Пункт под мышью.
     pub fn item_at(&self, full: Rect, column: u16, row: u16) -> Option<usize> {
         self.rows(full).iter().position(|r| contains(*r, column, row))
+    }
+}
+
+/// «Выше» и «Ниже» — отдельной группой, где есть куда.
+fn push_moves(items: &mut Vec<Item>, [up, down]: [bool; 2]) {
+    let moves = [(up, "⇡", "Выше в списке", Act::Up), (down, "⇣", "Ниже в списке", Act::Down)];
+    for (n, (_, icon, label, act)) in moves.into_iter().filter(|m| m.0).enumerate() {
+        items.push(Item { icon, label: label.into(), act, gap: n == 0 });
     }
 }
 

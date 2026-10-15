@@ -198,6 +198,9 @@ pub struct App {
     launch: Launch,
     /// Что сейчас под мышью — подсвечиваем.
     pub hover: Option<Target>,
+    /// Какую сессию тащат мышью по списку; `true` — весь её проект (тащат
+    /// строку проекта над копиями).
+    dragging: Option<(SessionId, bool)>,
     /// Какая форма указателя мыши выставлена в терминале.
     pointer: &'static str,
     /// Какая форма текстового курсора выставлена в терминале.
@@ -271,6 +274,7 @@ pub fn run() -> Result<()> {
         notifier: Notifier::new(launch.socket.clone()),
         launch,
         hover: None,
+        dragging: None,
         pointer: "",
         cursor_shape: 0,
         window_title: String::new(),
@@ -1182,6 +1186,15 @@ impl App {
                 }
             }
             Act::OpenProject => self.go_to(&dir),
+            Act::Up | Act::Down => {
+                // Строка проекта двигает весь проект — по его первой копии.
+                let whole = index.is_none();
+                let index = index.or_else(|| self.sessions.iter().position(|s| s.copy_of.as_ref() == Some(&dir)));
+                if let Some(order) = index.and_then(|i| self.moved(i, act == Act::Up, whole)) {
+                    self.reorder(order);
+                    self.save_state();
+                }
+            }
             Act::Finder => {
                 thread::spawn(move || Command::new("open").arg(&dir).stdout(Stdio::null()).stderr(Stdio::null()).status());
             }
@@ -1238,10 +1251,13 @@ impl App {
             || (matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) && event.modifiers.contains(KeyModifiers::CONTROL));
         if context && matches!(self.overlay, Overlay::None | Overlay::SessionMenu(_)) {
             let menu = match ui::slot_at(self, column, row) {
-                Some(ui::Slot::Card(index, _)) => Some(SessionMenu::for_session(&self.sessions[index], (column, row))),
-                Some(ui::Slot::Project(first)) => {
-                    self.sessions[first].copy_of.as_deref().map(|project| SessionMenu::for_project(project, (column, row)))
+                Some(ui::Slot::Card(index, _)) => {
+                    Some(SessionMenu::for_session(&self.sessions[index], self.moves(index, false), (column, row)))
                 }
+                Some(ui::Slot::Project(first)) => self.sessions[first]
+                    .copy_of
+                    .as_deref()
+                    .map(|project| SessionMenu::for_project(project, self.moves(first, true), (column, row))),
                 None => None,
             };
             if let Some(menu) = menu {
@@ -1249,6 +1265,25 @@ impl App {
                 self.hover = None;
                 return Ok(true);
             }
+        }
+
+        // Сессию тащат по списку — едет за мышью; отпустили — встала.
+        if let Some(dragged) = self.dragging {
+            match event.kind {
+                MouseEventKind::Drag(MouseButton::Left) => return Ok(self.drag_to(dragged, column, row) || dirty),
+                MouseEventKind::Up(_) => {
+                    self.dragging = None;
+                    return Ok(dirty);
+                }
+                _ => self.dragging = None,
+            }
+        }
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) && matches!(self.overlay, Overlay::None) {
+            self.dragging = match ui::slot_at(self, column, row) {
+                Some(ui::Slot::Card(index, _)) if target == Some(Target::Card(index)) => Some((self.sessions[index].id, false)),
+                Some(ui::Slot::Project(first)) => Some((self.sessions[first].id, true)),
+                _ => None,
+            };
         }
 
         match event.kind {
@@ -1563,12 +1598,65 @@ impl App {
         if order.iter().enumerate().all(|(i, &j)| i == j) {
             return;
         }
+        self.reorder(order);
+    }
+
+    /// Поставить сессии в порядке `order` (номера на старых местах);
+    /// выбранная остаётся выбранной.
+    fn reorder(&mut self, order: Vec<usize>) {
         let selected = self.current().map(|s| s.id);
         let mut taken: Vec<Option<Session>> = std::mem::take(&mut self.sessions).into_iter().map(Some).collect();
         self.sessions = order.into_iter().filter_map(|i| taken[i].take()).collect();
         if let Some(index) = selected.and_then(|id| self.index_of(id)) {
             self.selected = index;
         }
+    }
+
+    /// Порядок, где сессия (или `whole` — весь её проект) на шаг выше или ниже.
+    fn moved(&self, index: usize, up: bool, whole: bool) -> Option<Vec<usize>> {
+        ui::moved(&ui::tree_keys(&self.sessions), index, up, whole)
+    }
+
+    /// Можно ли сдвинуть выше и ниже — для меню сессии.
+    fn moves(&self, index: usize, whole: bool) -> [bool; 2] {
+        [true, false].map(|up| self.moved(index, up, whole).is_some())
+    }
+
+    /// Тащат сессию: двигаем её к строке под мышью по шагу, пока следующий
+    /// шаг не унёс бы её за мышь — иначе проект, что больше соседа, прыгал
+    /// бы туда-сюда. `true` — список поменялся.
+    fn drag_to(&mut self, (id, whole): (SessionId, bool), column: u16, row: u16) -> bool {
+        let Some(over) = ui::slot_at(self, column, row) else { return false };
+        // Где в списке строка сессии: карточка или, для проекта, его строка.
+        let place = |slots: &[ui::Slot], index: usize| {
+            slots.iter().position(|s| match *s {
+                ui::Slot::Card(i, _) => !whole && i == index,
+                ui::Slot::Project(i) => whole && i == index,
+            })
+        };
+        let Some(mouse) = ui::slots(&ui::tree_keys(&self.sessions)).iter().position(|s| *s == over) else { return false };
+        let mut changed = false;
+        while let Some(index) = self.index_of(id) {
+            let keys = ui::tree_keys(&self.sessions);
+            let Some(at) = place(&ui::slots(&keys), index) else { break };
+            if at == mouse {
+                break;
+            }
+            let up = mouse < at;
+            let Some(order) = ui::moved(&keys, index, up, whole) else { break };
+            let after: Vec<_> = order.iter().map(|&i| keys[i]).collect();
+            let new_index = order.iter().position(|&i| i == index).unwrap_or(index);
+            let Some(new_at) = place(&ui::slots(&after), new_index) else { break };
+            if (up && new_at < mouse) || (!up && new_at > mouse) {
+                break;
+            }
+            self.reorder(order);
+            changed = true;
+        }
+        if changed {
+            self.save_state();
+        }
+        changed
     }
 
     /// Закрыть выбранную сессию: Claude гасим в фоне, чтобы не ждать.
